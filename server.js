@@ -1097,4 +1097,4 @@ app.use((err, req, res, next) => {
 });
 
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`Khata Agent on http://localhost:${port}`));
+app.listen(port, () => console.log(`Uncle Store on http://localhost:${port}`));

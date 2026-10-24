@@ -10,5 +10,5 @@ export async function sendMail({ to, subject, text }) {
     service: 'gmail',
     auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_APP_PASSWORD },
   });
-  await transport.sendMail({ from: `Khata Agent <${process.env.GMAIL_USER}>`, to, subject, text });
+  await transport.sendMail({ from: `Uncle Store <${process.env.GMAIL_USER}>`, to, subject, text });
 }
