@@ -12,10 +12,10 @@ import { seed, seedHabits, AREA_CENTERS } from './seed.js';
 
 const DAY = 86400000;
 const IST = 5.5 * 3600000;
-// Online orders pay the platform ₹14; delivery orders also pay the shop's delivery fee.
+// Online orders pay the platform ₹14; delivery orders (any shop) also pay a ₹25 delivery fee to the shop.
 // Customers pay everything to the shop's UPI, so platform fees build up as the shop's "fees due".
 const PLATFORM_FEE = 14;
-const DEFAULT_DELIVERY_FEE = 30;
+const DELIVERY_FEE = 25;
 const PLANS = { day: { price: 100, label: 'Day pass' }, premium: { price: 5000, label: 'Premium (30 days)' } };
 
 const id = () => crypto.randomUUID().slice(0, 8);
@@ -57,14 +57,14 @@ const planActive = (shop) => Boolean(shop.plan && new Date(shop.plan.validUntil)
 const isPremium = (shop) => planActive(shop) && shop.plan.type === 'premium';
 const publicShop = (s) => ({
   id: s.id, shopName: s.shopName, ownerName: s.ownerName, area: s.area, category: s.category, lat: s.lat, lng: s.lng,
-  premium: isPremium(s), delivery: isPremium(s), open: planActive(s),
+  premium: isPremium(s), delivery: true, open: planActive(s),
   deliveryFee: deliveryFeeOf(s), acceptsUpi: acceptsUpi(s), platformFee: PLATFORM_FEE,
 });
 const privateShop = (s) => ({
   ...publicShop(s), ownerName: s.ownerName, phone: s.phone, email: s.email, plan: s.plan, planActive: planActive(s),
   upiId: s.upiId || '', payeeName: s.payeeName || '', hasQr: Boolean(s.qrImage),
 });
-const deliveryFeeOf = (s) => Number.isFinite(s.deliveryFee) ? s.deliveryFee : DEFAULT_DELIVERY_FEE;
+const deliveryFeeOf = () => DELIVERY_FEE;
 const acceptsUpi = (s) => Boolean(s.upiId || s.qrImage);
 // What the shop earns from an order: items + delivery fee (the platform fee is not the shop's).
 const shopRevenue = (o) => (o.itemsTotal ?? o.total) + (o.deliveryFee || 0);
@@ -410,7 +410,6 @@ app.post('/api/orders', customerAuth, (req, res) => {
   const shop = db.shops.find((s) => s.id === shopId);
   if (!shop || !planActive(shop)) fail(400, 'This shop is not taking orders today');
   if (!['pickup', 'delivery'].includes(fulfilment)) fail(400, 'Choose pickup or delivery');
-  if (fulfilment === 'delivery' && !isPremium(shop)) fail(400, 'This shop offers pickup only');
   if (fulfilment === 'delivery' && !address) fail(400, 'Delivery address required');
   if (!['online', 'pay_at_shop'].includes(paymentMethod)) fail(400, 'Choose a payment method');
   if (paymentMethod === 'online' && !acceptsUpi(shop)) fail(400, 'This shop takes payment at pickup or delivery only');
@@ -565,9 +564,9 @@ app.post('/api/owner/demo-login', (req, res) => {
   res.json({ shop: privateShop(shop), token: shop.token });
 });
 
-// Owner settings: shop pin and area name, UPI ID / QR image for receiving money, delivery fee.
+// Owner settings: shop pin and area name, UPI ID / QR image for receiving money.
 app.patch('/api/owner/shop', ownerAuth, (req, res) => {
-  const { location, area, upiId, payeeName, qrImage, deliveryFee } = req.body;
+  const { location, area, upiId, payeeName, qrImage } = req.body;
   if (upiId !== undefined) {
     const v = String(upiId).trim();
     if (v && !/^[\w.\-]{2,64}@[a-zA-Z][\w]{1,32}$/.test(v)) fail(400, 'UPI ID looks wrong. It should look like name@okaxis or 9876543210@ybl');
@@ -581,11 +580,6 @@ app.patch('/api/owner/shop', ownerAuth, (req, res) => {
       if (qrImage.length > 700000) fail(400, 'QR image is too large. Use a screenshot under 500 KB');
       req.shop.qrImage = qrImage;
     }
-  }
-  if (deliveryFee !== undefined) {
-    const f = Number(deliveryFee);
-    if (!Number.isInteger(f) || f < 0 || f > 200) fail(400, 'Delivery fee must be between ₹0 and ₹200');
-    req.shop.deliveryFee = f;
   }
   if (location !== undefined) {
     if (!validPoint(location)) fail(400, 'Pick the shop location on the map');
@@ -1110,7 +1104,7 @@ function matchShops({ items, area, location }) {
       else missing.push(w.name);
     }
     return {
-      shopId: shop.id, shopName: shop.shopName, area: shop.area, premium: isPremium(shop), delivery: isPremium(shop),
+      shopId: shop.id, shopName: shop.shopName, area: shop.area, premium: isPremium(shop), delivery: true,
       found, missing, coverage: wanted.length ? found.length / wanted.length : 0,
       total: found.reduce((t, f) => t + f.price * f.qty, 0),
       distanceKm: distanceFrom(from, shop),

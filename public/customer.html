@@ -229,7 +229,7 @@ const shopCard = (s) => `
       <h3 style="margin-top:8px">${esc(s.shopName)}</h3>
       ${s.distanceKm != null ? `<div><strong>📍 ${travelText(s.distanceKm)}</strong></div>` : ''}
       <div class="muted">${esc(s.area)} · ${s.items} items in stock</div>
-      <div class="muted">${s.delivery ? `🛵 Delivery ${rupees(s.deliveryFee)} · or free pickup` : '🛍️ Pickup only: order ahead, collect packed'}</div>
+      <div class="muted">🛵 Delivery ${rupees(s.deliveryFee)} · or pickup with no delivery fee</div>
     </button>`;
 
 async function loadShops() {

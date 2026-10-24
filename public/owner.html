@@ -179,7 +179,6 @@
         <label>Or upload your QR (photo or screenshot)</label>
         <div class="row"><input type="file" id="setQr" accept="image/png,image/jpeg,image/webp" class="grow"><button class="small secondary hidden" id="rmQr" onclick="removeQr()">Remove QR</button></div>
         <img id="qrPreview" class="hidden" style="max-width:160px;border-radius:8px;margin-top:8px" alt="Your QR">
-        <div id="delFeeRow"><label>Delivery fee you charge (₹)</label><input id="setDelFee" type="number" min="0" max="200" style="max-width:160px"></div>
         <button style="margin-top:8px" onclick="savePayments()">Save</button>
       </div>
       <div class="grid two" id="tabPlans"></div>
@@ -270,7 +269,7 @@ async function refreshMe() {
   feesNow = r.fees;
   $('planBanner').innerHTML = (me.planActive
     ? `<div class="row"><div class="grow"><strong>${esc(me.shopName)}</strong> is <span class="badge paid">live</span> on ${me.premium ? '<span class="badge premium">Premium</span>' : 'a Day pass'} until ${until}.
-        <div class="muted">${me.premium ? 'Featured in every area · delivery on' : 'Listed in ' + esc(me.area) + ' · pickup orders'}</div></div>
+        <div class="muted">${me.premium ? 'Featured in every area · pickup and delivery' : 'Listed in ' + esc(me.area) + ' · pickup and delivery'}</div></div>
         ${me.premium ? '' : '<button class="small secondary" onclick="setTab(\'plan\')">Upgrade</button>'}</div>`
     : `<div class="row"><div class="grow"><strong>${esc(me.shopName)}</strong> is <span class="badge cancelled">not live</span>. Customers can't see you today.</div>
         <button class="small" onclick="setTab('plan')">Go live for ₹100</button></div>`) + extras;
@@ -654,9 +653,9 @@ async function askCoach() {
 // ---- plans ----
 const PLAN_INFO = {
   day: { title: 'Day pass', price: '₹100', per: '/ day', cta: 'Go live today for ₹100',
-    points: ['Listed in your area until midnight', 'Customers order ahead; you confirm and pack, they walk in and pick up', 'Inventory, billing and the AI inventory coach'] },
+    points: ['Listed in your area until midnight', 'Customers order ahead: they pick up, or you deliver (₹25 delivery charge)', 'Inventory, billing and the AI inventory coach'] },
   premium: { title: 'Premium <span class="badge premium">Most reach</span>', price: '₹5,000', per: '/ month', cta: 'Get Premium for ₹5,000',
-    points: ['Featured at the top in <strong>every</strong> area', 'Home delivery with live rider tracking', 'Insights and the AI stock advisor: what sells in your area and what to stock more of'] },
+    points: ['Featured at the top in <strong>every</strong> area', 'Everything in the Day pass, for 30 days', 'Insights and the AI stock advisor: what sells in your area and what to stock more of'] },
 };
 // mode 'auth' = not signed in yet (button leads to Create account); otherwise the button pays.
 function planCards(mode) {
@@ -688,8 +687,6 @@ function loadPlanTab() {
       <div style="text-align:right"><div class="stat">${rupees(feesNow.due)}</div><div class="muted">due</div></div></div>
     ${feesNow.due ? '<button class="small" style="margin-top:8px" onclick="payFees()">Pay to Uncle Store</button>' : ''}`;
   $('setUpi').value = me.upiId; $('setPayee').value = me.payeeName || me.ownerName || '';
-  $('setDelFee').value = me.deliveryFee;
-  $('delFeeRow').classList.toggle('hidden', !me.premium);
   qrData = undefined; $('setQr').value = '';
   $('qrPreview').src = me.hasQr ? `/api/shops/${me.id}/qr?t=${Date.now()}` : '';
   $('qrPreview').classList.toggle('hidden', !me.hasQr); $('rmQr').classList.toggle('hidden', !me.hasQr);
@@ -713,7 +710,6 @@ $('setQr').onchange = () => {
 async function savePayments() {
   const body = { upiId: $('setUpi').value.trim(), payeeName: $('setPayee').value.trim() };
   if (qrData) body.qrImage = qrData;
-  if (me.premium) body.deliveryFee = Number($('setDelFee').value);
   me = await call('/api/owner/shop', { method: 'PATCH', body });
   toast('Payment details saved'); await refreshMe(); loadPlanTab();
 }
