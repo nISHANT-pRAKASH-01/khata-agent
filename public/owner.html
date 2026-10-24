@@ -66,7 +66,7 @@
       <button data-tab="customers">Customers</button>
       <button data-tab="coach">🎓 Coach</button>
       <button data-tab="insights">Insights</button>
-      <button data-tab="plan">Plan</button>
+      <button data-tab="plan">Plan &amp; settings</button>
     </nav>
 
     <div id="t-orders" class="tab">
@@ -168,7 +168,21 @@
     <div id="t-insights" class="tab"><div id="insights"></div></div>
 
     <div id="t-plan" class="tab">
-      <div class="grid two" style="margin-top:12px" id="tabPlans"></div>
+      <div class="card" style="margin-top:12px" id="feesCard"></div>
+      <div class="card">
+        <h3>💳 Receive payments</h3>
+        <p class="muted">Customers pay for orders straight to you. Add your UPI ID (we make a QR with the amount filled in), or upload your shop's QR.</p>
+        <div class="row">
+          <div class="grow"><label>UPI ID</label><input id="setUpi" placeholder="e.g. 9876543210@ybl or shopname@okaxis" autocomplete="off"></div>
+          <div class="grow"><label>Name on UPI</label><input id="setPayee" placeholder="As shown in your UPI app"></div>
+        </div>
+        <label>Or upload your QR (photo or screenshot)</label>
+        <div class="row"><input type="file" id="setQr" accept="image/png,image/jpeg,image/webp" class="grow"><button class="small secondary hidden" id="rmQr" onclick="removeQr()">Remove QR</button></div>
+        <img id="qrPreview" class="hidden" style="max-width:160px;border-radius:8px;margin-top:8px" alt="Your QR">
+        <div id="delFeeRow"><label>Delivery fee you charge (₹)</label><input id="setDelFee" type="number" min="0" max="200" style="max-width:160px"></div>
+        <button style="margin-top:8px" onclick="savePayments()">Save</button>
+      </div>
+      <div class="grid two" id="tabPlans"></div>
       <div class="card">
         <h3>📍 Shop location</h3>
         <p class="muted">Customers see how far you are and get directions from this pin. Search, use GPS, or drag the pin.</p>
@@ -250,17 +264,22 @@ async function refreshMe() {
   if (lastOpen !== null && r.toConfirm > lastOpen) toast('🔔 New order: please confirm it');
   lastOpen = r.toConfirm;
   const until = me.plan && new Date(me.plan.validUntil).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
-  $('planBanner').innerHTML = me.planActive
+  const noUpi = !me.upiId && !me.hasQr;
+  const extras = (noUpi ? `<div class="row" style="margin-top:8px"><span class="grow">⚠ Add your UPI ID so customers can pay you online.</span><button class="small" onclick="setTab('plan')">Add UPI</button></div>` : '')
+    + (r.fees.due >= 100 ? `<div class="row" style="margin-top:8px"><span class="grow">Platform fees due: <strong>${rupees(r.fees.due)}</strong></span><button class="small secondary" onclick="payFees()">Pay now</button></div>` : '');
+  feesNow = r.fees;
+  $('planBanner').innerHTML = (me.planActive
     ? `<div class="row"><div class="grow"><strong>${esc(me.shopName)}</strong> is <span class="badge paid">live</span> on ${me.premium ? '<span class="badge premium">Premium</span>' : 'a Day pass'} until ${until}.
         <div class="muted">${me.premium ? 'Featured in every area · delivery on' : 'Listed in ' + esc(me.area) + ' · pickup orders'}</div></div>
         ${me.premium ? '' : '<button class="small secondary" onclick="setTab(\'plan\')">Upgrade</button>'}</div>`
     : `<div class="row"><div class="grow"><strong>${esc(me.shopName)}</strong> is <span class="badge cancelled">not live</span>. Customers can't see you today.</div>
-        <button class="small" onclick="setTab('plan')">Go live for ₹100</button></div>`;
+        <button class="small" onclick="setTab('plan')">Go live for ₹100</button></div>`) + extras;
 }
 
 function setTab(t) {
   tab = t; store.set('ownerTab', t);
   document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('active', b.dataset.tab === t));
+  document.querySelector('#tabs button.active')?.scrollIntoView({ inline: 'center', block: 'nearest' });
   document.querySelectorAll('.tab').forEach((el) => el.classList.toggle('hidden', el.id !== 't-' + t));
   ({ orders: loadOrders, inventory: loadInventory, billing: loadBilling, customers: loadCustomers, coach: loadCoach, insights: loadInsights, plan: loadPlanTab })[t]();
 }
@@ -295,6 +314,7 @@ async function loadOrders() {
         <span class="badge ${o.status}">${STATUS_TEXT[o.status]}</span></div>
       <div class="muted">${when(o.at)} · #${o.id}${o.address ? ' · ' + esc(o.address) : ''}</div>
       <div style="margin:6px 0">${o.items.map((l) => `${esc(l.name)} × ${l.qty}`).join(' · ')}</div>
+      ${o.platformFee ? `<div class="muted">Items ${rupees(o.itemsTotal)}${o.deliveryFee ? ` + your delivery fee ${rupees(o.deliveryFee)}` : ''} + platform fee ${rupees(o.platformFee)} (owed to Uncle Store)</div>` : ''}
       ${o.rider ? `<div class="muted">Rider: ${esc(o.rider.name)} (${esc(o.rider.phone)}) ·
         <a href="${esc(waUrl(o.rider.phone, `Delivery for ${me.shopName}, order #${o.id}. Open this and keep it open while riding: ${location.origin}${o.rider.link}`))}" target="_blank">send rider link</a> ·
         <a href="${esc(o.rider.link)}" target="_blank">open rider page</a></div>` : ''}
@@ -660,9 +680,51 @@ function choosePlanFirst(key) {
   toast('Create your account first. You\'ll pay for the plan right after.');
 }
 let editPicker = null;
+let feesNow = { charged: 0, paid: 0, due: 0 }, qrData;
 function loadPlanTab() {
   $('tabPlans').innerHTML = planCards('tab');
+  $('feesCard').innerHTML = `<div class="row"><div class="grow"><h3 style="margin:0">Platform fees</h3>
+      <div class="muted">₹14 per online order you confirm. Charged so far ${rupees(feesNow.charged)}, paid ${rupees(feesNow.paid)}.</div></div>
+      <div style="text-align:right"><div class="stat">${rupees(feesNow.due)}</div><div class="muted">due</div></div></div>
+    ${feesNow.due ? '<button class="small" style="margin-top:8px" onclick="payFees()">Pay to Uncle Store</button>' : ''}`;
+  $('setUpi').value = me.upiId; $('setPayee').value = me.payeeName || me.ownerName || '';
+  $('setDelFee').value = me.deliveryFee;
+  $('delFeeRow').classList.toggle('hidden', !me.premium);
+  qrData = undefined; $('setQr').value = '';
+  $('qrPreview').src = me.hasQr ? `/api/shops/${me.id}/qr?t=${Date.now()}` : '';
+  $('qrPreview').classList.toggle('hidden', !me.hasQr); $('rmQr').classList.toggle('hidden', !me.hasQr);
   editPicker = locationPicker($('editPicker'), { initial: { lat: me.lat, lng: me.lng }, area: me.area }); }
+// Shrink the uploaded QR to a sharp, small PNG before sending (phone photos can be several MB).
+$('setQr').onchange = () => {
+  const f = $('setQr').files[0];
+  if (!f) return;
+  const img = new Image();
+  img.onload = () => {
+    const scale = Math.min(1, 700 / Math.max(img.width, img.height));
+    const c = document.createElement('canvas');
+    c.width = Math.round(img.width * scale); c.height = Math.round(img.height * scale);
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    qrData = c.toDataURL('image/jpeg', 0.9);
+    $('qrPreview').src = qrData; $('qrPreview').classList.remove('hidden');
+    URL.revokeObjectURL(img.src);
+  };
+  img.src = URL.createObjectURL(f);
+};
+async function savePayments() {
+  const body = { upiId: $('setUpi').value.trim(), payeeName: $('setPayee').value.trim() };
+  if (qrData) body.qrImage = qrData;
+  if (me.premium) body.deliveryFee = Number($('setDelFee').value);
+  me = await call('/api/owner/shop', { method: 'PATCH', body });
+  toast('Payment details saved'); await refreshMe(); loadPlanTab();
+}
+async function removeQr() {
+  me = await call('/api/owner/shop', { method: 'PATCH', body: { qrImage: null } });
+  toast('QR removed'); await refreshMe(); loadPlanTab();
+}
+async function payFees() {
+  const r = await call('/api/owner/fees/pay', { body: {} });
+  openPayment(r.paymentLink);
+}
 async function saveLocation() {
   const where = editPicker.value();
   if (!where.location) return toast('Pick your shop location first');

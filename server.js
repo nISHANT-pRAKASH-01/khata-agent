@@ -12,6 +12,10 @@ import { seed, seedHabits, AREA_CENTERS } from './seed.js';
 
 const DAY = 86400000;
 const IST = 5.5 * 3600000;
+// Online orders pay the platform ₹14; delivery orders also pay the shop's delivery fee.
+// Customers pay everything to the shop's UPI, so platform fees build up as the shop's "fees due".
+const PLATFORM_FEE = 14;
+const DEFAULT_DELIVERY_FEE = 30;
 const PLANS = { day: { price: 100, label: 'Day pass' }, premium: { price: 5000, label: 'Premium (30 days)' } };
 
 const id = () => crypto.randomUUID().slice(0, 8);
@@ -54,8 +58,25 @@ const isPremium = (shop) => planActive(shop) && shop.plan.type === 'premium';
 const publicShop = (s) => ({
   id: s.id, shopName: s.shopName, ownerName: s.ownerName, area: s.area, category: s.category, lat: s.lat, lng: s.lng,
   premium: isPremium(s), delivery: isPremium(s), open: planActive(s),
+  deliveryFee: deliveryFeeOf(s), acceptsUpi: acceptsUpi(s), platformFee: PLATFORM_FEE,
 });
-const privateShop = (s) => ({ ...publicShop(s), ownerName: s.ownerName, phone: s.phone, email: s.email, plan: s.plan, planActive: planActive(s) });
+const privateShop = (s) => ({
+  ...publicShop(s), ownerName: s.ownerName, phone: s.phone, email: s.email, plan: s.plan, planActive: planActive(s),
+  upiId: s.upiId || '', payeeName: s.payeeName || '', hasQr: Boolean(s.qrImage),
+});
+const deliveryFeeOf = (s) => Number.isFinite(s.deliveryFee) ? s.deliveryFee : DEFAULT_DELIVERY_FEE;
+const acceptsUpi = (s) => Boolean(s.upiId || s.qrImage);
+// What the shop earns from an order: items + delivery fee (the platform fee is not the shop's).
+const shopRevenue = (o) => (o.itemsTotal ?? o.total) + (o.deliveryFee || 0);
+
+// Platform fees owed by a shop: ₹14 per online order it confirmed, minus what it has already paid us.
+function feesFor(shopId) {
+  const charged = db.orders.filter((o) => o.shopId === shopId && o.platformFee && !['placed', 'cancelled'].includes(o.status))
+    .reduce((t, o) => t + o.platformFee, 0);
+  const paid = db.payments.filter((p) => p.shopId === shopId && p.kind === 'fees' && ['claimed', 'paid'].includes(p.status))
+    .reduce((t, p) => t + p.amount, 0);
+  return { charged, paid, due: Math.max(0, charged - paid) };
+}
 const shopOf = (o) => db.shops.find((s) => s.id === o.shopId);
 // Centre of an area: the built-in demo areas, otherwise the average position of shops registered there.
 function areaCenter(area) {
@@ -77,7 +98,8 @@ function notify(to, subject, text) {
     .catch((err) => log('system', 'email_failed', { subject, error: err.message }));
 }
 
-const itemsText = (o) => o.items.map((l) => `  • ${l.name} × ${l.qty} = ₹${l.price * l.qty}`).join('\n') + `\n  Total: ₹${o.total}`;
+const itemsText = (o) => o.items.map((l) => `  • ${l.name} × ${l.qty} = ₹${l.price * l.qty}`).join('\n') +
+  (o.platformFee ? `\n  Platform fee: ₹${o.platformFee}` : '') + (o.deliveryFee ? `\n  Delivery fee: ₹${o.deliveryFee}` : '') + `\n  Total: ₹${o.total}`;
 
 function emailForStatus(o, base) {
   const shop = shopOf(o);
@@ -192,7 +214,7 @@ function claimPaid(p, utr) {
 
 const app = express();
 app.set('trust proxy', true);
-app.use(express.json());
+app.use(express.json({ limit: '1mb' })); // room for an uploaded QR image
 app.use(express.static('public'));
 const baseUrl = (req) => process.env.PUBLIC_URL?.replace(/\/$/, '') || `${req.protocol}://${req.get('host')}`;
 
@@ -389,12 +411,16 @@ app.post('/api/orders', customerAuth, (req, res) => {
   if (fulfilment === 'delivery' && !isPremium(shop)) fail(400, 'This shop offers pickup only');
   if (fulfilment === 'delivery' && !address) fail(400, 'Delivery address required');
   if (!['online', 'pay_at_shop'].includes(paymentMethod)) fail(400, 'Choose a payment method');
+  if (paymentMethod === 'online' && !acceptsUpi(shop)) fail(400, 'This shop takes payment at pickup or delivery only');
 
   const lines = priceLines(shop.id, items);
+  const itemsTotal = lines.reduce((t, l) => t + l.price * l.qty, 0);
+  const deliveryFee = fulfilment === 'delivery' ? deliveryFeeOf(shop) : 0;
   const order = {
     id: id(), idempotencyKey, shopId: shop.id, channel: 'online',
     customerId: c.id, customerName: c.name, customerPhone: c.phone, customerEmail: c.email,
-    items: lines, total: lines.reduce((t, l) => t + l.price * l.qty, 0), fulfilment, address: address || null,
+    items: lines, itemsTotal, platformFee: PLATFORM_FEE, deliveryFee, total: itemsTotal + PLATFORM_FEE + deliveryFee,
+    fulfilment, address: address || null,
     location: fulfilment === 'delivery' ? (validPoint(location) ? location : areaCenter(c.area) || { lat: shop.lat, lng: shop.lng }) : null,
     paymentMethod, paymentStatus: 'pending', status: 'placed', timeline: [{ status: 'placed', at: now() }], at: now(),
   };
@@ -439,7 +465,21 @@ app.post('/api/orders/:id/cancel', customerAuth, (req, res) => {
 app.get('/api/payments/:id', (req, res) => {
   const p = db.payments.find((x) => x.id === req.params.id);
   if (!p) fail(404, 'Payment not found');
-  res.json({ id: p.id, amount: p.amount, description: p.description, status: p.status, provider: p.provider, kind: p.kind });
+  // Orders and bills are paid to the shop's own UPI; plan and platform fees to Uncle Store's QR.
+  const shop = p.kind === 'order' && db.shops.find((s) => s.id === p.shopId);
+  res.json({
+    id: p.id, amount: p.amount, description: p.description, status: p.status, provider: p.provider, kind: p.kind,
+    payee: shop
+      ? { platform: false, name: shop.payeeName || shop.shopName, upiId: shop.upiId || null, qrImage: shop.qrImage ? `/api/shops/${shop.id}/qr` : null }
+      : { platform: true, name: 'Uncle Store', upiId: null, qrImage: '/upi-qr.jpg' },
+  });
+});
+
+app.get('/api/shops/:id/qr', (req, res) => {
+  const shop = db.shops.find((s) => s.id === req.params.id);
+  const m = shop?.qrImage?.match(/^data:(image\/(?:png|jpeg|webp));base64,(.+)$/);
+  if (!m) fail(404, 'No QR');
+  res.type(m[1]).set('Cache-Control', 'no-cache').send(Buffer.from(m[2], 'base64'));
 });
 
 app.post('/api/payments/:id/claim', (req, res) => {
@@ -523,9 +563,28 @@ app.post('/api/owner/demo-login', (req, res) => {
   res.json({ shop: privateShop(shop), token: shop.token });
 });
 
-// Owner fixes the shop's pin or area name later.
+// Owner settings: shop pin and area name, UPI ID / QR image for receiving money, delivery fee.
 app.patch('/api/owner/shop', ownerAuth, (req, res) => {
-  const { location, area } = req.body;
+  const { location, area, upiId, payeeName, qrImage, deliveryFee } = req.body;
+  if (upiId !== undefined) {
+    const v = String(upiId).trim();
+    if (v && !/^[\w.\-]{2,64}@[a-zA-Z][\w]{1,32}$/.test(v)) fail(400, 'UPI ID looks wrong. It should look like name@okaxis or 9876543210@ybl');
+    req.shop.upiId = v;
+  }
+  if (payeeName !== undefined) req.shop.payeeName = String(payeeName).trim().slice(0, 60);
+  if (qrImage !== undefined) {
+    if (qrImage === null) delete req.shop.qrImage;
+    else {
+      if (!/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(qrImage)) fail(400, 'Upload the QR as a PNG or JPG image');
+      if (qrImage.length > 700000) fail(400, 'QR image is too large. Use a screenshot under 500 KB');
+      req.shop.qrImage = qrImage;
+    }
+  }
+  if (deliveryFee !== undefined) {
+    const f = Number(deliveryFee);
+    if (!Number.isInteger(f) || f < 0 || f > 200) fail(400, 'Delivery fee must be between ₹0 and ₹200');
+    req.shop.deliveryFee = f;
+  }
   if (location !== undefined) {
     if (!validPoint(location)) fail(400, 'Pick the shop location on the map');
     Object.assign(req.shop, { lat: Number(location.lat), lng: Number(location.lng) });
@@ -534,7 +593,7 @@ app.patch('/api/owner/shop', ownerAuth, (req, res) => {
     if (!String(area).trim()) fail(400, 'Area name is required');
     req.shop.area = String(area).trim().slice(0, 60);
   }
-  log('shopkeeper', 'shop_location_updated', { shopId: req.shop.id, area: req.shop.area });
+  log('shopkeeper', 'shop_settings_updated', { shopId: req.shop.id, fields: Object.keys(req.body).filter((k) => req.body[k] !== undefined) });
   res.json(privateShop(req.shop));
 });
 
@@ -545,7 +604,17 @@ app.get('/api/owner/me', ownerAuth, (req, res) => {
     toConfirm: mine.filter((o) => o.status === 'placed').length,
     openOrders: mine.filter((o) => ['placed', 'confirmed', 'packed', 'out_for_delivery'].includes(o.status)).length,
     lowStock: db.products.filter((p) => p.shopId === req.shop.id && p.stock <= p.lowStockAt).length,
+    fees: feesFor(req.shop.id),
   });
+});
+
+// Shop pays its accumulated platform fees to Uncle Store (our QR).
+app.post('/api/owner/fees/pay', ownerAuth, async (req, res) => {
+  const { due } = feesFor(req.shop.id);
+  if (!due) fail(400, 'No platform fees due');
+  const open = db.payments.find((p) => p.shopId === req.shop.id && p.kind === 'fees' && p.status === 'pending' && p.amount === due);
+  const p = open || await createPayment({ kind: 'fees', refId: req.shop.id, shopId: req.shop.id, amount: due, description: `Platform fees for ${req.shop.shopName}`, customerName: req.shop.ownerName, customerPhone: req.shop.phone });
+  res.json({ paymentLink: p.link });
 });
 
 app.get('/api/owner/orders', ownerAuth, (req, res) => {
@@ -606,8 +675,8 @@ function shopCustomers(shopId) {
   for (const o of db.orders.filter((o) => o.shopId === shopId && o.status !== 'cancelled' && o.customerPhone)) {
     const c = map[o.customerPhone] ??= { name: o.customerName, phone: o.customerPhone, email: o.customerEmail, orders: 0, spend: 0, orders30: 0, spend30: 0, firstOrderAt: o.at, lastOrderAt: o.at, items: {}, hours: {} };
     c.orders++;
-    c.spend += o.total;
-    if (Date.now() - Date.parse(o.at) < 30 * DAY) { c.orders30++; c.spend30 += o.total; }
+    c.spend += shopRevenue(o);
+    if (Date.now() - Date.parse(o.at) < 30 * DAY) { c.orders30++; c.spend30 += shopRevenue(o); }
     if (o.at < c.firstOrderAt) c.firstOrderAt = o.at;
     if (o.at > c.lastOrderAt) c.lastOrderAt = o.at;
     c.email ??= o.customerEmail;
@@ -697,11 +766,12 @@ app.post('/api/owner/bills', ownerAuth, async (req, res) => {
   const existing = db.orders.find((o) => o.shopId === req.shop.id && o.idempotencyKey === idempotencyKey);
   if (existing) return res.json({ bill: existing, paymentLink: db.payments.find((p) => p.id === existing.paymentId)?.link, duplicate: true });
   if (!['cash', 'online'].includes(paymentMethod)) fail(400, 'Choose cash or UPI QR');
+  if (paymentMethod === 'online' && !acceptsUpi(req.shop)) fail(400, 'Add your UPI ID or QR in Plan & settings first');
   if (customerPhone && !/^\d{10}$/.test(customerPhone)) fail(400, 'Phone must be 10 digits');
   let lines = priceLines(req.shop.id, items);
   const bill = {
     id: id(), idempotencyKey, shopId: req.shop.id, channel: 'walk_in', customerId: null, customerName: customerName || 'Walk-in', customerPhone: customerPhone || null,
-    items: lines, total: lines.reduce((t, l) => t + l.price * l.qty, 0), fulfilment: 'counter',
+    items: lines, itemsTotal: lines.reduce((t, l) => t + l.price * l.qty, 0), total: lines.reduce((t, l) => t + l.price * l.qty, 0), fulfilment: 'counter',
     paymentMethod, paymentStatus: paymentMethod === 'cash' ? 'paid' : 'pending', status: 'completed', timeline: [{ status: 'completed', at: now() }], at: now(),
   };
   let payment;
@@ -734,7 +804,7 @@ app.get('/api/owner/insights', ownerAuth, (req, res) => {
   const t = Date.now();
   const orders = db.orders.filter((o) => o.shopId === shopId && o.status !== 'cancelled');
   const within = (days) => orders.filter((o) => t - Date.parse(o.at) < days * DAY);
-  const revenue = (list) => list.reduce((s, o) => s + o.total, 0);
+  const revenue = (list) => list.reduce((s, o) => s + shopRevenue(o), 0);
   const last30 = within(30);
   const today = istDay(t);
 
