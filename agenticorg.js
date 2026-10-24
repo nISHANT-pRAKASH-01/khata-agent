@@ -25,6 +25,19 @@ export async function runAgent(agent, inputs) {
   return { runId: data.run_id ?? data.task_id ?? data.id, status: data.status, confidence: data.confidence, output: data.output, raw: data };
 }
 
+// Agents without tools answer in JSON. Accept an object, or the first {...} block inside text
+// (models sometimes wrap it in prose or ```json fences). Returns null if there is none.
+export function outputJson(output) {
+  if (output && typeof output === 'object') {
+    if (typeof output.text === 'string' || typeof output.answer === 'string') return outputJson(output.text || output.answer) || output;
+    return output;
+  }
+  const text = String(output || '');
+  const start = text.indexOf('{'), end = text.lastIndexOf('}');
+  if (start < 0 || end <= start) return null;
+  try { return JSON.parse(text.slice(start, end + 1)); } catch { return null; }
+}
+
 // Agent output may be text or JSON; reduce it to something we can show a user.
 export function outputText(output) {
   if (output == null) return '';

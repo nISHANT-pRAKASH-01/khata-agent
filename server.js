@@ -1195,8 +1195,17 @@ app.post('/api/owner/coach/tips', ownerAuth, async (req, res) => {
   let agentStatus;
   if (agenticorg.isConfigured('coach')) {
     try {
-      const run = await agenticorg.runAgent('coach', { task: `Coach shop ${shop.id} (${shop.shopName}) on keeping inventory accurate.`, shopId: shop.id, ownerName: shop.ownerName });
+      const habits = inventoryHabits(shop.id);
+      const run = await agenticorg.runAgent('coach', {
+        task: `Coach ${shop.ownerName} of ${shop.shopName} on keeping inventory accurate. Their stock-keeping data: ${JSON.stringify(habits)}. ` +
+          'Reply ONLY with JSON: {"summary":"score and the one habit to focus on, 1-2 sentences","tips":[{"habit":"billing|wholesale|counting|shelf|general","tip":"what to do, citing their numbers"}]}',
+        shopId: shop.id, ownerName: shop.ownerName, habits,
+      });
       agentStatus = run.status;
+      const j = agenticorg.outputJson(run.output);
+      if (!db.coachTips.slice(before).some((x) => x.shopId === shop.id) && Array.isArray(j?.tips) && j.tips.length) {
+        saveCoachTips({ shopId: shop.id, summary: j.summary, tips: j.tips, source: 'agenticorg' });
+      }
       log('agent', 'agenticorg_run', { agent: 'coach', shopId: shop.id, runId: run.runId, status: run.status });
     } catch (err) {
       log('agent', 'agenticorg_run_failed', { agent: 'coach', shopId: shop.id, error: err.message });
@@ -1316,10 +1325,14 @@ app.post('/api/assistant/shop', customerAuth, async (req, res) => {
   if (agenticorg.isConfigured('shopper')) {
     try {
       const run = await agenticorg.runAgent('shopper', {
-        task: `Customer shopping list: "${text}". Find the best nearby shops.`, requestId: a.id, area: c.area, lat: location?.lat, lng: location?.lng,
+        task: `Customer shopping list: "${text}". Turn it into items. Reply ONLY with JSON: {"items":[{"name":"plain English product","qty":1}],"note":"one short friendly line"}`,
+        list: text, requestId: a.id, area: c.area, lat: location?.lat, lng: location?.lng,
       });
       a.agentStatus = run.status;
-      a.summary = agenticorg.outputText(run.output);
+      // Without tools (no MCP connector), the agent returns the cleaned-up items and we match shops here.
+      const j = agenticorg.outputJson(run.output);
+      if (!a.result && Array.isArray(j?.items) && j.items.length) a.result = matchShops({ items: j.items, area: c.area, location });
+      if (a.result) a.summary = [j?.note, localSummary(a.result)].filter(Boolean).join(' ');
       log('agent', 'agenticorg_run', { agent: 'shopper', requestId: a.id, runId: run.runId, status: run.status });
     } catch (err) {
       log('agent', 'agenticorg_run_failed', { agent: 'shopper', requestId: a.id, error: err.message });
@@ -1425,8 +1438,17 @@ app.post('/api/owner/stock-advice', ownerAuth, async (req, res) => {
   let agentStatus;
   if (agenticorg.isConfigured('demand')) {
     try {
-      const run = await agenticorg.runAgent('demand', { task: `Suggest what shop ${shop.id} (${shop.shopName}, ${shop.area}) should stock more of.`, shopId: shop.id, area: shop.area });
+      const demand = areaDemand(shop.area, 14), inventory = shopInventory(shop.id);
+      const run = await agenticorg.runAgent('demand', {
+        task: `Suggest what shop ${shop.shopName} (${shop.area}) should stock more of. Area demand: ${JSON.stringify(demand)}. Shop inventory: ${JSON.stringify(inventory)}. ` +
+          'Reply ONLY with JSON: {"summary":"2-3 sentences","suggestions":[{"product":"","productId":"from inventory if sold","action":"stock_more|add_new|promote","suggestedQty":10,"reason":"cite the numbers"}]}',
+        shopId: shop.id, area: shop.area, demand, inventory,
+      });
       agentStatus = run.status;
+      const j = agenticorg.outputJson(run.output);
+      if (!db.stockAdvice.slice(before).some((x) => x.shopId === shop.id) && Array.isArray(j?.suggestions)) {
+        saveStockSuggestions({ shopId: shop.id, summary: j.summary, suggestions: j.suggestions, source: 'agenticorg' });
+      }
       log('agent', 'agenticorg_run', { agent: 'demand', shopId: shop.id, runId: run.runId, status: run.status });
     } catch (err) {
       log('agent', 'agenticorg_run_failed', { agent: 'demand', shopId: shop.id, error: err.message });
