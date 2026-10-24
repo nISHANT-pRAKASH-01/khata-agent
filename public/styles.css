@@ -1,0 +1,90 @@
+:root {
+  --bg: #f7f5f0; --card: #ffffff; --text: #1d1b16; --muted: #6b665c; --line: #e7e2d8;
+  --brand: #d9480f; --brand-ink: #ffffff; --brand-soft: #fff0e6;
+  --ok: #2b8a3e; --ok-soft: #e6f6ea; --warn: #b26a00; --warn-soft: #fff4d6; --bad: #c92a2a; --bad-soft: #ffe8e8;
+  --info-soft: #e7f0ff; --gold: #9c6b00; --gold-soft: #fff3c4;
+  --radius: 14px; --shadow: 0 1px 2px rgba(0,0,0,.04), 0 4px 16px rgba(0,0,0,.04);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15140f; --card: #1f1d18; --text: #f2efe8; --muted: #a8a295; --line: #34312a;
+    --brand: #ff7a3d; --brand-ink: #1a0d05; --brand-soft: #3a2216;
+    --ok: #69db7c; --ok-soft: #1b3322; --warn: #ffc94d; --warn-soft: #3a3016; --bad: #ff8787; --bad-soft: #3d1c1c;
+    --info-soft: #1c2a40; --gold: #ffd43b; --gold-soft: #3a3214; --shadow: none;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); line-height: 1.45; }
+a { color: var(--brand); }
+main { max-width: 960px; margin: 0 auto; padding: 16px; }
+h1 { font-size: 1.6rem; margin: 8px 0 4px; } h2 { font-size: 1.15rem; margin: 0 0 12px; } h3 { font-size: 1rem; margin: 0 0 8px; }
+.muted { color: var(--muted); font-size: .9rem; }
+.hidden { display: none !important; }
+
+header.top { position: sticky; top: 0; z-index: 5; background: var(--card); border-bottom: 1px solid var(--line); }
+header.top .bar { max-width: 960px; margin: 0 auto; padding: 10px 16px; display: flex; align-items: center; gap: 12px; }
+header.top .logo { font-weight: 800; text-decoration: none; color: var(--text); font-size: 1.1rem; }
+header.top .logo span { color: var(--brand); }
+header.top .spacer { flex: 1; }
+
+.card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; margin: 12px 0; box-shadow: var(--shadow); }
+.grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+.grid.two { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; } .row > .grow { flex: 1; min-width: 120px; }
+
+input, select, textarea, button { font: inherit; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--text); }
+input, select, textarea { width: 100%; margin: 4px 0; }
+label { font-size: .85rem; color: var(--muted); display: block; margin-top: 6px; }
+button { background: var(--brand); color: var(--brand-ink); border-color: transparent; cursor: pointer; font-weight: 650; }
+button:disabled { opacity: .55; cursor: default; }
+button.secondary { background: var(--card); color: var(--text); border-color: var(--line); }
+button.ghost { background: transparent; color: var(--brand); border-color: transparent; padding: 6px 8px; }
+button.danger { background: var(--bad); color: #fff; }
+button.small { padding: 6px 10px; font-size: .85rem; }
+button.block { width: 100%; }
+
+.tabs { display: flex; gap: 4px; overflow-x: auto; border-bottom: 1px solid var(--line); margin: 8px 0 4px; }
+.tabs button { background: transparent; color: var(--muted); border-radius: 0; border-bottom: 2px solid transparent; padding: 10px 12px; white-space: nowrap; }
+.tabs button.active { color: var(--text); border-bottom-color: var(--brand); }
+.count { display: inline-block; min-width: 20px; padding: 0 6px; border-radius: 999px; background: var(--brand); color: var(--brand-ink); font-size: .75rem; margin-left: 4px; }
+
+.badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: .75rem; font-weight: 600; background: var(--info-soft); }
+.badge.premium { background: var(--gold-soft); color: var(--gold); }
+.badge.pending, .badge.placed { background: var(--warn-soft); color: var(--warn); }
+.badge.accepted, .badge.approved, .badge.ready, .badge.out_for_delivery { background: var(--info-soft); }
+.badge.paid, .badge.completed { background: var(--ok-soft); color: var(--ok); }
+.badge.rejected, .badge.cancelled { background: var(--bad-soft); color: var(--bad); }
+.badge.on_khata { background: var(--brand-soft); color: var(--brand); }
+
+table { width: 100%; border-collapse: collapse; }
+td, th { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); font-size: .92rem; vertical-align: middle; }
+th { color: var(--muted); font-weight: 600; font-size: .8rem; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.table-wrap { overflow-x: auto; }
+
+.shop-card { cursor: pointer; text-align: left; background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; font-weight: normal; }
+.shop-card:hover { border-color: var(--brand); }
+.shop-card.featured { border-color: var(--gold); }
+.product { display: flex; gap: 8px; align-items: center; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.product:last-child { border-bottom: 0; }
+.stepper { display: inline-flex; align-items: center; gap: 6px; }
+.stepper button { width: 32px; height: 32px; padding: 0; }
+.stat { font-size: 1.5rem; font-weight: 750; font-variant-numeric: tabular-nums; }
+.low { color: var(--bad); font-weight: 600; }
+
+.cart-bar { position: sticky; bottom: 0; background: var(--card); border-top: 1px solid var(--line); padding: 12px 16px; display: flex; gap: 12px; align-items: center; justify-content: space-between; margin: 0 -16px; }
+.hero { padding: 28px 0 8px; }
+.hero h1 { font-size: 2rem; }
+.plan { border: 2px solid var(--line); }
+.plan.best { border-color: var(--brand); }
+.plan .price { font-size: 1.8rem; font-weight: 800; }
+.plan ul { padding-left: 18px; margin: 8px 0 12px; }
+
+.bars { display: flex; align-items: flex-end; gap: 4px; height: 120px; }
+.bars div { flex: 1; background: var(--brand); border-radius: 4px 4px 0 0; min-height: 2px; position: relative; }
+.bars-x { display: flex; gap: 4px; font-size: .7rem; color: var(--muted); }
+.bars-x span { flex: 1; text-align: center; }
+.hbar { height: 8px; background: var(--brand-soft); border-radius: 4px; overflow: hidden; }
+.hbar i { display: block; height: 100%; background: var(--brand); }
+
+#toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 10px; font-size: .9rem; z-index: 50; max-width: calc(100% - 32px); }

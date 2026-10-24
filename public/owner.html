@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>My shop — Khata Agent</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<header class="top"><div class="bar">
+  <a class="logo" href="/">Khata<span>Agent</span></a><span class="spacer"></span>
+  <span id="who" class="muted"></span>
+  <button class="ghost small hidden" id="logoutBtn" onclick="logout()">Log out</button>
+</div></header>
+<main>
+  <!-- Login / signup -->
+  <section id="v-auth" class="hidden">
+    <div class="grid two" style="margin-top:16px">
+      <div class="card">
+        <h2>Log in</h2>
+        <label>Phone</label><input id="liPhone" inputmode="numeric" maxlength="10">
+        <label>4-digit PIN</label><input id="liPin" type="password" inputmode="numeric" maxlength="4">
+        <button class="block" style="margin-top:12px" onclick="login()">Log in</button>
+        <p class="muted">Demo shop: 9810000001 / 1234 (Premium) or 9810000002 / 1234 (Day pass)</p>
+      </div>
+      <div class="card">
+        <h2>Register your shop</h2>
+        <label>Your name</label><input id="suOwner">
+        <label>Shop name</label><input id="suShop">
+        <div class="row">
+          <div class="grow"><label>Area</label><input id="suArea" list="areas" placeholder="e.g. Indiranagar"><datalist id="areas"></datalist></div>
+          <div class="grow"><label>Type</label><select id="suCat"><option value="kirana">Kirana</option><option value="fresh">Fruits &amp; veg</option><option value="medical">Medical</option><option value="other">Other</option></select></div>
+        </div>
+        <div class="row">
+          <div class="grow"><label>Phone</label><input id="suPhone" inputmode="numeric" maxlength="10"></div>
+          <div class="grow"><label>Choose a 4-digit PIN</label><input id="suPin" type="password" inputmode="numeric" maxlength="4"></div>
+        </div>
+        <button class="block" style="margin-top:12px" onclick="signup()">Register</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Dashboard -->
+  <section id="v-app" class="hidden">
+    <div class="card" id="planBanner"></div>
+    <nav class="tabs" id="tabs">
+      <button data-tab="orders">Orders<span class="count hidden" id="cOrders"></span></button>
+      <button data-tab="inventory">Inventory<span class="count hidden" id="cLow"></span></button>
+      <button data-tab="billing">Billing</button>
+      <button data-tab="khata">Khata &amp; agent</button>
+      <button data-tab="insights">Insights</button>
+      <button data-tab="plan">Plan</button>
+    </nav>
+
+    <div id="t-orders" class="tab">
+      <div class="row" style="margin:8px 0"><label style="margin:0"><input type="checkbox" id="showAll" style="width:auto" onchange="loadOrders()"> Show completed &amp; cancelled</label></div>
+      <div id="orders"></div>
+    </div>
+
+    <div id="t-inventory" class="tab">
+      <details class="card"><summary><strong>+ Add a product</strong></summary>
+        <div class="row">
+          <div class="grow"><label>Name</label><input id="npName" placeholder="e.g. Amul Ghee 500ml"></div>
+          <div class="grow"><label>Category</label><input id="npCat" placeholder="e.g. Dairy"></div>
+        </div>
+        <div class="row">
+          <div class="grow"><label>Unit</label><input id="npUnit" placeholder="pack"></div>
+          <div class="grow"><label>Price ₹</label><input id="npPrice" type="number" min="1"></div>
+          <div class="grow"><label>Opening stock</label><input id="npStock" type="number" min="0"></div>
+          <div class="grow"><label>Alert below</label><input id="npLow" type="number" min="0" value="5"></div>
+        </div>
+        <button style="margin-top:8px" onclick="addProduct()">Add product</button>
+      </details>
+      <div class="card table-wrap">
+        <table><thead><tr><th>Item</th><th class="num">Price</th><th class="num">In stock</th><th>Add stock</th></tr></thead><tbody id="inv"></tbody></table>
+      </div>
+    </div>
+
+    <div id="t-billing" class="tab">
+      <div class="grid two">
+        <div class="card">
+          <h3>Add items</h3>
+          <input id="billSearch" placeholder="Search item…" oninput="renderBillPicker()">
+          <div id="billPicker" style="max-height:340px;overflow:auto"></div>
+        </div>
+        <div class="card">
+          <h3>Bill</h3>
+          <div class="table-wrap"><table><tbody id="billLines"></tbody></table></div>
+          <p style="text-align:right"><strong>Total <span id="billTotal">₹0</span></strong></p>
+          <div class="row">
+            <input id="bName" class="grow" placeholder="Customer name (optional for cash)">
+            <input id="bPhone" class="grow" placeholder="Phone" inputmode="numeric" maxlength="10">
+          </div>
+          <div class="row" style="margin-top:8px">
+            <button class="grow" onclick="bill('cash')">Cash</button>
+            <button class="grow secondary" onclick="bill('online')">Pine Labs link</button>
+            <button class="grow secondary" onclick="bill('khata')">On khata</button>
+          </div>
+          <p class="muted">Stock goes down as soon as you bill.</p>
+          <div id="billResult"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="t-khata" class="tab">
+      <div class="card">
+        <h3>Agent drafts waiting for you</h3>
+        <p class="muted">Khata Munshi (our AgenticOrg agent) checks who owes you and drafts polite reminders. Nothing goes out until you approve it.</p>
+        <button id="runAgentBtn" onclick="runAgent()">Ask Khata Munshi to check dues</button>
+        <div id="reminders"></div>
+      </div>
+      <div class="grid two">
+        <div class="card">
+          <h3>Add udhaar / payment</h3>
+          <div class="row">
+            <input id="kName" class="grow" placeholder="Customer name">
+            <input id="kPhone" class="grow" placeholder="Phone" inputmode="numeric" maxlength="10">
+          </div>
+          <div class="row">
+            <input id="kAmount" class="grow" type="number" min="1" placeholder="Amount ₹">
+            <select id="kType" class="grow"><option value="credit">Took on credit (udhaar)</option><option value="payment">Paid back</option></select>
+          </div>
+          <input id="kNote" placeholder="Note (optional), e.g. rice, oil">
+          <button onclick="addKhata()">Save</button>
+        </div>
+        <div class="card">
+          <h3>Who owes what</h3>
+          <table><tbody id="balances"></tbody></table>
+        </div>
+      </div>
+    </div>
+
+    <div id="t-insights" class="tab"><div id="insights"></div></div>
+
+    <div id="t-plan" class="tab">
+      <div class="grid two" style="margin-top:12px">
+        <div class="card plan">
+          <h3>Day pass</h3>
+          <div class="price">₹100 <span class="muted">/ day</span></div>
+          <ul class="muted"><li>Listed in your area until midnight</li><li>Pickup orders: customers order, you pack, they walk in</li><li>Inventory, billing, khata, AI munshi</li></ul>
+          <button class="block" id="buyDay" onclick="buyPlan('day')">Go live today for ₹100</button>
+        </div>
+        <div class="card plan best">
+          <h3>Premium <span class="badge premium">Most reach</span></h3>
+          <div class="price">₹5,000 <span class="muted">/ month</span></div>
+          <ul class="muted"><li>Featured at the top in every area</li><li>Home delivery orders</li><li>Insights: top sellers, sales trend, repeat customers, shop views, restock advice</li></ul>
+          <button class="block" onclick="buyPlan('premium')">Get Premium for ₹5,000</button>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+<script src="/common.js"></script>
+<script>
+let token = store.get('ownerToken');
+let me = null, products = [], billCart = {}, lastOpen = null, tab = store.get('ownerTab') || 'orders';
+const auth = (extra) => ({ headers: { 'x-owner-token': token }, ...extra });
+const call = async (path, opts) => {
+  try { return await api(path, auth(opts)); } catch (err) { if (err.status === 401) logout(); throw err; }
+};
+
+// ---- auth ----
+async function login() {
+  const r = await api('/api/owner/login', { body: { phone: $('liPhone').value.trim(), pin: $('liPin').value.trim() } });
+  token = r.token; store.set('ownerToken', token); start();
+}
+async function signup() {
+  const r = await api('/api/owner/signup', { body: {
+    ownerName: $('suOwner').value.trim(), shopName: $('suShop').value.trim(), area: $('suArea').value.trim(),
+    category: $('suCat').value, phone: $('suPhone').value.trim(), pin: $('suPin').value.trim(),
+  } });
+  token = r.token; store.set('ownerToken', token); tab = 'plan'; start();
+}
+function logout() { store.set('ownerToken', null); token = me = null; showAuth(); }
+
+async function showAuth() {
+  $('v-auth').classList.remove('hidden'); $('v-app').classList.add('hidden');
+  $('who').textContent = ''; $('logoutBtn').classList.add('hidden');
+  const areas = await api('/api/areas');
+  $('areas').innerHTML = areas.map((a) => `<option value="${esc(a)}">`).join('');
+}
+
+async function start() {
+  if (!token) return showAuth();
+  await refreshMe();
+  $('v-auth').classList.add('hidden'); $('v-app').classList.remove('hidden');
+  $('logoutBtn').classList.remove('hidden');
+  setTab(tab);
+}
+
+async function refreshMe() {
+  const r = await call('/api/owner/me');
+  me = r.shop;
+  $('who').textContent = me.shopName;
+  $('cOrders').textContent = r.openOrders; $('cOrders').classList.toggle('hidden', !r.openOrders);
+  $('cLow').textContent = r.lowStock; $('cLow').classList.toggle('hidden', !r.lowStock);
+  if (lastOpen !== null && r.openOrders > lastOpen) toast('🔔 New order received');
+  lastOpen = r.openOrders;
+  const until = me.plan && new Date(me.plan.validUntil).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
+  $('planBanner').innerHTML = me.planActive
+    ? `<div class="row"><div class="grow"><strong>${esc(me.shopName)}</strong> is <span class="badge paid">live</span> on ${me.premium ? '<span class="badge premium">Premium</span>' : 'a Day pass'} until ${until}.
+        <div class="muted">${me.premium ? 'Featured in every area · delivery on' : 'Listed in ' + esc(me.area) + ' · pickup orders'}</div></div>
+        ${me.premium ? '' : '<button class="small secondary" onclick="setTab(\'plan\')">Upgrade</button>'}</div>`
+    : `<div class="row"><div class="grow"><strong>${esc(me.shopName)}</strong> is <span class="badge cancelled">not live</span>. Customers can't see you today.</div>
+        <button class="small" onclick="setTab('plan')">Go live for ₹100</button></div>`;
+  $('buyDay').disabled = me.premium;
+}
+
+function setTab(t) {
+  tab = t; store.set('ownerTab', t);
+  document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('active', b.dataset.tab === t));
+  document.querySelectorAll('.tab').forEach((el) => el.classList.toggle('hidden', el.id !== 't-' + t));
+  ({ orders: loadOrders, inventory: loadInventory, billing: loadBilling, khata: loadKhata, insights: loadInsights, plan: () => {} })[t]();
+}
+document.querySelectorAll('#tabs button').forEach((b) => b.onclick = () => setTab(b.dataset.tab));
+
+// ---- orders ----
+const ACTIONS = {
+  placed: (o) => [['accepted', o.paymentMethod === 'khata' ? 'Accept & give credit' : 'Accept & pack'], ['cancelled', 'Reject']],
+  accepted: (o) => [o.fulfilment === 'delivery' ? ['out_for_delivery', 'Out for delivery'] : ['ready', 'Packed: ready for pickup'], ['cancelled', 'Cancel']],
+  ready: () => [['completed', 'Picked up']],
+  out_for_delivery: () => [['completed', 'Delivered']],
+};
+async function loadOrders() {
+  const all = await call('/api/owner/orders');
+  const list = $('showAll').checked ? all : all.filter((o) => ACTIONS[o.status]);
+  $('orders').innerHTML = list.map((o) => `
+    <div class="card">
+      <div class="row"><strong class="grow">${esc(o.customerName)} <span class="muted">${esc(o.customerPhone || '')}</span></strong>
+        <span class="badge">${o.channel === 'walk_in' ? 'Counter' : o.fulfilment === 'delivery' ? '🛵 Delivery' : '🛍️ Pickup'}</span>
+        <span class="badge ${o.status}">${label(o.status)}</span></div>
+      <div class="muted">${when(o.at)} · #${o.id}${o.address ? ' · ' + esc(o.address) : ''}</div>
+      <div style="margin:6px 0">${o.items.map((l) => `${esc(l.name)} × ${l.qty}`).join(' · ')}</div>
+      <div class="row"><strong class="grow">${rupees(o.total)} <span class="badge ${o.paymentStatus}">${o.paymentStatus === 'pending' ? label(o.paymentMethod) + ' · unpaid' : label(o.paymentStatus)}</span></strong>
+        ${(ACTIONS[o.status]?.(o) || []).map(([s, t]) => `<button class="small ${s === 'cancelled' ? 'secondary' : ''}" onclick="setStatus('${o.id}','${s}')">${t}</button>`).join('')}</div>
+    </div>`).join('') || '<p class="muted">No open orders right now. New orders show up here automatically.</p>';
+}
+async function setStatus(id, status) {
+  if (status === 'cancelled' && !confirm('Cancel this order? Stock will be put back.')) return;
+  await call(`/api/owner/orders/${id}/status`, { body: { status } });
+  refreshMe(); loadOrders();
+}
+
+// ---- inventory ----
+async function loadInventory() {
+  products = await call('/api/owner/products');
+  $('inv').innerHTML = products.map((p) => `<tr>
+    <td>${esc(p.name)}<div class="muted">${esc(p.category)} · ${esc(p.unit)}</div></td>
+    <td class="num"><button class="ghost small" onclick="editPrice('${p.id}')">${rupees(p.price)} ✎</button></td>
+    <td class="num ${p.stock <= p.lowStockAt ? 'low' : ''}">${p.stock}${p.stock <= p.lowStockAt ? ' ⚠' : ''}</td>
+    <td><div class="row" style="flex-wrap:nowrap"><input id="rs-${p.id}" type="number" min="1" placeholder="Qty" style="width:80px"><button class="small" onclick="restock('${p.id}')">+ Add</button></div></td>
+  </tr>`).join('');
+}
+async function restock(id) {
+  const qty = Number($('rs-' + id).value);
+  const p = await call(`/api/owner/products/${id}/restock`, { body: { qty } });
+  toast(`${p.name}: now ${p.stock} in stock`);
+  refreshMe(); loadInventory();
+}
+async function editPrice(id) {
+  const p = products.find((x) => x.id === id);
+  const v = prompt(`New price for ${p.name}`, p.price);
+  if (v === null) return;
+  await call(`/api/owner/products/${id}`, { method: 'PATCH', body: { price: Number(v) } });
+  loadInventory();
+}
+async function addProduct() {
+  await call('/api/owner/products', { body: {
+    name: $('npName').value.trim(), category: $('npCat').value.trim(), unit: $('npUnit').value.trim(),
+    price: Number($('npPrice').value), stock: Number($('npStock').value), lowStockAt: Number($('npLow').value),
+  } });
+  ['npName', 'npCat', 'npUnit', 'npPrice', 'npStock'].forEach((f) => $(f).value = '');
+  toast('Product added'); refreshMe(); loadInventory();
+}
+
+// ---- walk-in billing ----
+async function loadBilling() { products = await call('/api/owner/products'); renderBillPicker(); renderBill(); }
+function renderBillPicker() {
+  const q = $('billSearch').value.toLowerCase();
+  $('billPicker').innerHTML = products.filter((p) => p.name.toLowerCase().includes(q)).map((p) => `
+    <div class="product"><div>${esc(p.name)}<div class="muted">${rupees(p.price)} · ${p.stock} in stock</div></div>
+    <button class="small" ${p.stock <= (billCart[p.id] || 0) ? 'disabled' : ''} onclick="billAdd('${p.id}',1)">Add</button></div>`).join('');
+}
+function billAdd(id, d) {
+  const p = products.find((x) => x.id === id);
+  const n = Math.min(p.stock, Math.max(0, (billCart[id] || 0) + d));
+  if (n) billCart[id] = n; else delete billCart[id];
+  renderBillPicker(); renderBill();
+}
+function renderBill() {
+  const lines = Object.entries(billCart).map(([id, qty]) => ({ ...products.find((p) => p.id === id), qty }));
+  $('billLines').innerHTML = lines.map((l) => `<tr><td>${esc(l.name)}</td>
+    <td class="num"><span class="stepper"><button class="secondary" onclick="billAdd('${l.id}',-1)">−</button>${l.qty}<button onclick="billAdd('${l.id}',1)">+</button></span></td>
+    <td class="num">${rupees(l.qty * l.price)}</td></tr>`).join('') || '<tr><td class="muted">No items yet</td></tr>';
+  $('billTotal').textContent = rupees(lines.reduce((t, l) => t + l.qty * l.price, 0));
+}
+async function bill(paymentMethod) {
+  const r = await call('/api/owner/bills', { body: {
+    items: Object.entries(billCart).map(([productId, qty]) => ({ productId, qty })),
+    customerName: $('bName').value.trim(), customerPhone: $('bPhone').value.trim(), paymentMethod,
+  } });
+  billCart = {}; $('bName').value = ''; $('bPhone').value = '';
+  const link = r.paymentLink && (r.paymentLink.startsWith('/') ? location.origin + r.paymentLink : r.paymentLink);
+  const wa = link && r.bill.customerPhone && `https://wa.me/91${r.bill.customerPhone}?text=${encodeURIComponent(`Namaste ${r.bill.customerName}, your bill at ${me.shopName} is ${rupees(r.bill.total)}. Pay here: ${link}`)}`;
+  $('billResult').innerHTML = `<div class="card"><strong>Billed ${rupees(r.bill.total)}</strong> · ${label(r.bill.paymentStatus)}
+    ${link ? `<div class="row" style="margin-top:8px"><a href="${esc(wa)}" target="_blank"><button class="small">Send link on WhatsApp</button></a>
+    <button class="small secondary" onclick="openPayment('${esc(r.paymentLink)}')">Open link</button></div>` : ''}</div>`;
+  toast('Bill saved, stock updated'); refreshMe(); loadBilling();
+}
+
+// ---- khata + agent ----
+function waLink(r) {
+  const phone = r.customerPhone.replace(/\D/g, '').replace(/^(\d{10})$/, '91$1');
+  const link = r.paymentLink?.startsWith('/') ? location.origin + r.paymentLink : r.paymentLink;
+  return `https://wa.me/${phone}?text=${encodeURIComponent(`${r.message}\n\nPay here: ${link}`)}`;
+}
+function reminderHtml(r) {
+  const head = `<p><span class="badge ${r.status}">${r.status}</span> <strong>${esc(r.customerName)}</strong> · ${rupees(r.amount)}</p>`;
+  if (r.status === 'pending') return `<div class="card">${head}
+    <textarea id="msg-${r.id}" rows="3">${esc(r.message)}</textarea>
+    <div class="row"><button class="grow" onclick="approve('${r.id}')">Approve &amp; create payment link</button><button class="danger" onclick="reject('${r.id}')">Reject</button></div></div>`;
+  if (r.status === 'approved') return `<div class="card">${head}<p class="muted">${esc(r.message)}</p>
+    <div class="row"><a href="${esc(waLink(r))}" target="_blank"><button>Send on WhatsApp</button></a><button class="secondary" onclick="markPaid('${r.id}')">Mark paid</button></div></div>`;
+  return `<div class="card">${head}<p class="muted">${esc(r.message)}</p></div>`;
+}
+async function loadKhata() {
+  const k = await call('/api/owner/khata');
+  $('balances').innerHTML = k.balances.map((b) => `<tr><td>${esc(b.customerName)}<div class="muted">${esc(b.customerPhone)}</div></td><td class="num">${rupees(b.balance)}</td></tr>`).join('') || '<tr><td class="muted">Nobody owes you anything 🎉</td></tr>';
+  $('reminders').innerHTML = k.reminders.map(reminderHtml).join('') || '<p class="muted">No drafts yet.</p>';
+}
+async function addKhata() {
+  await call('/api/owner/khata/entries', { body: { customerName: $('kName').value.trim(), customerPhone: $('kPhone').value.trim(), amount: Number($('kAmount').value), type: $('kType').value, note: $('kNote').value.trim() } });
+  ['kName', 'kPhone', 'kAmount', 'kNote'].forEach((f) => $(f).value = '');
+  toast('Saved to khata'); loadKhata();
+}
+async function runAgent() {
+  const btn = $('runAgentBtn');
+  btn.disabled = true; btn.textContent = 'Agent is working…';
+  try { await call('/api/owner/run-agent', { body: {} }); toast('Agent finished. Check the drafts below.'); }
+  catch {} finally { btn.disabled = false; btn.textContent = 'Ask Khata Munshi to check dues'; loadKhata(); }
+}
+async function approve(id) { const r = await call(`/api/owner/reminders/${id}/approve`, { body: { message: $('msg-' + id).value } }); toast('Approved. Payment link ready.'); loadKhata(); }
+async function reject(id) { await call(`/api/owner/reminders/${id}/reject`, { body: { reason: 'shopkeeper rejected' } }); loadKhata(); }
+async function markPaid(id) { await call(`/api/owner/reminders/${id}/mark-paid`, { body: {} }); loadKhata(); }
+
+// ---- insights (Premium) ----
+async function loadInsights() {
+  let d;
+  try { d = await call('/api/owner/insights'); } catch (err) {
+    if (err.status !== 402) return;
+    $('insights').innerHTML = `<div class="card plan best" style="margin-top:12px"><h2>🔒 Insights are part of Premium</h2>
+      <p class="muted">See which products sell most, your sales over the last two weeks, your repeat customers, how many people viewed your shop, and what to restock first.</p>
+      <button onclick="setTab('plan')">See Premium</button></div>`;
+    return;
+  }
+  const maxDay = Math.max(1, ...d.salesByDay.map((x) => x.revenue));
+  const maxQty = Math.max(1, ...d.topProducts.map((x) => x.qty));
+  $('insights').innerHTML = `
+    <div class="grid" style="margin-top:12px">
+      <div class="card"><div class="muted">Sales today</div><div class="stat">${rupees(d.revenue.today)}</div></div>
+      <div class="card"><div class="muted">Last 7 days</div><div class="stat">${rupees(d.revenue.d7)}</div></div>
+      <div class="card"><div class="muted">Last 30 days</div><div class="stat">${rupees(d.revenue.d30)}</div><div class="muted">${d.orders30} orders · ${d.channels.online} online / ${d.channels.walkIn} counter</div></div>
+      <div class="card"><div class="muted">Shop views (30d)</div><div class="stat">${d.reach.views30}</div><div class="muted">${d.reach.conversion}% became online orders</div></div>
+    </div>
+    ${d.restockFirst.length ? `<div class="card" style="border-color:var(--bad)"><strong>Restock first:</strong> ${d.restockFirst.map(esc).join(', ')}. These are top sellers that are running low.</div>` : ''}
+    <div class="card"><h3>Sales, last 14 days</h3>
+      <div class="bars">${d.salesByDay.map((x) => `<div title="${x.day}: ${rupees(x.revenue)}" style="height:${(x.revenue / maxDay) * 100}%"></div>`).join('')}</div>
+      <div class="bars-x">${d.salesByDay.map((x, i) => `<span>${i % 2 ? '' : x.day.slice(8)}</span>`).join('')}</div></div>
+    <div class="grid two">
+      <div class="card"><h3>Top sellers (30 days)</h3>${d.topProducts.map((p) => `
+        <div style="margin:8px 0"><div class="row"><span class="grow">${esc(p.name)}</span><span class="muted">${p.qty} sold · ${rupees(p.revenue)}</span></div>
+        <div class="hbar"><i style="width:${(p.qty / maxQty) * 100}%"></i></div></div>`).join('')}</div>
+      <div class="card"><h3>Best customers</h3><p class="muted">${d.repeatCustomers} customers came back more than once this month.</p>
+        <table><tbody>${d.topCustomers.map((c) => `<tr><td>${esc(c.name)}</td><td class="num">${c.orders} orders</td><td class="num">${rupees(c.spend)}</td></tr>`).join('')}</tbody></table></div>
+    </div>`;
+}
+
+// ---- plans ----
+async function buyPlan(plan) {
+  const r = await call('/api/owner/plan', { body: { plan } });
+  openPayment(r.paymentLink);
+}
+
+start();
+setInterval(() => { if (me) { refreshMe(); if (tab === 'orders') loadOrders(); } }, 10000);
+</script>
+</body>
+</html>

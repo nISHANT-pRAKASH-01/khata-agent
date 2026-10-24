@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shop local — Khata Agent</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<header class="top"><div class="bar">
+  <a class="logo" href="/">Khata<span>Agent</span></a><span class="spacer"></span>
+  <span id="who" class="muted"></span>
+  <button class="ghost small hidden" id="ordersBtn" onclick="show('orders')">My orders</button>
+  <button class="ghost small hidden" id="logoutBtn" onclick="logout()">Log out</button>
+</div></header>
+<main>
+  <!-- Login -->
+  <section id="v-login" class="hidden">
+    <div class="card" style="max-width:420px;margin:24px auto">
+      <h2>Start shopping</h2>
+      <p class="muted">We use your number so the shop can call you when your order is packed.</p>
+      <label>Your name</label><input id="lName" autocomplete="name">
+      <label>Phone</label><input id="lPhone" inputmode="numeric" maxlength="10" placeholder="10-digit mobile">
+      <label>Your area</label><select id="lArea"></select>
+      <button class="block" style="margin-top:12px" onclick="login()">Continue</button>
+    </div>
+  </section>
+
+  <!-- Shops -->
+  <section id="v-shops" class="hidden">
+    <div class="row" style="margin-top:8px">
+      <select id="area" class="grow" onchange="loadShops()"></select>
+      <input id="q" class="grow" placeholder="Search shop or item, e.g. atta" oninput="debouncedShops()">
+    </div>
+    <div id="shops" class="grid" style="margin-top:12px"></div>
+  </section>
+
+  <!-- One shop -->
+  <section id="v-shop" class="hidden">
+    <button class="ghost" onclick="show('shops')">← All shops</button>
+    <div class="card">
+      <h2 id="shopName"></h2>
+      <p class="muted" id="shopMeta"></p>
+    </div>
+    <div id="products"></div>
+    <div class="cart-bar" id="cartBar">
+      <div><strong id="cartTotal"></strong> <span class="muted" id="cartCount"></span></div>
+      <button onclick="show('checkout')">Checkout →</button>
+    </div>
+  </section>
+
+  <!-- Checkout -->
+  <section id="v-checkout" class="hidden">
+    <button class="ghost" onclick="show('shop')">← Back to shop</button>
+    <div class="card">
+      <h2>Your order from <span id="coShop"></span></h2>
+      <div class="table-wrap"><table><tbody id="coLines"></tbody></table></div>
+      <p style="text-align:right"><strong>Total <span id="coTotal"></span></strong></p>
+    </div>
+    <div class="card">
+      <h3>How do you want it?</h3>
+      <label><input type="radio" name="ful" value="pickup" checked style="width:auto" onchange="syncCheckout()"> I'll pick it up (shop packs it for you)</label>
+      <label id="delOpt"><input type="radio" name="ful" value="delivery" style="width:auto" onchange="syncCheckout()"> Deliver to me</label>
+      <textarea id="address" rows="2" class="hidden" placeholder="Flat, street, landmark"></textarea>
+    </div>
+    <div class="card">
+      <h3>Payment</h3>
+      <label><input type="radio" name="pay" value="online" checked style="width:auto"> Pay now: UPI / card via Pine Labs <span id="testNote" class="muted"></span></label>
+      <label><input type="radio" name="pay" value="pay_at_shop" style="width:auto"> Pay at pickup / on delivery</label>
+      <label><input type="radio" name="pay" value="khata" style="width:auto"> Add to my khata (shop must approve the credit)</label>
+      <button class="block" style="margin-top:12px" id="placeBtn" onclick="placeOrder()">Place order</button>
+    </div>
+  </section>
+
+  <!-- Orders -->
+  <section id="v-orders" class="hidden">
+    <button class="ghost" onclick="show('shops')">← Shops</button>
+    <h2>My orders</h2>
+    <div id="orders"></div>
+  </section>
+</main>
+<script src="/common.js"></script>
+<script>
+let token = store.get('customerToken');
+let me = JSON.parse(store.get('customer') || 'null');
+let config = {};
+let shop = null, products = [], cart = {};
+const auth = () => ({ headers: { 'x-customer-token': token } });
+
+function show(view) {
+  for (const v of ['login', 'shops', 'shop', 'checkout', 'orders']) $('v-' + v).classList.toggle('hidden', v !== view);
+  $('who').textContent = me ? `Hi, ${me.name}` : '';
+  $('ordersBtn').classList.toggle('hidden', !me);
+  $('logoutBtn').classList.toggle('hidden', !me);
+  if (view === 'shops') loadShops();
+  if (view === 'shop') renderProducts();
+  if (view === 'checkout') renderCheckout();
+  if (view === 'orders') loadOrders();
+  scrollTo(0, 0);
+}
+
+async function init() {
+  const [areas, cfg] = await Promise.all([api('/api/areas'), api('/api/config')]);
+  config = cfg;
+  const opts = areas.map((a) => `<option>${esc(a)}</option>`).join('');
+  $('lArea').innerHTML = opts;
+  $('area').innerHTML = '<option value="">All areas</option>' + opts;
+  if (me?.area) $('area').value = me.area;
+  $('testNote').textContent = config.paymentsLive ? '' : '(test mode)';
+  show(me ? (new URLSearchParams(location.search).has('orders') ? 'orders' : 'shops') : 'login');
+}
+
+async function login() {
+  const r = await api('/api/customers/login', { body: { name: $('lName').value.trim(), phone: $('lPhone').value.trim(), area: $('lArea').value } });
+  token = r.token; me = r.customer;
+  store.set('customerToken', token); store.set('customer', JSON.stringify(me));
+  $('area').value = me.area || '';
+  show('shops');
+}
+
+function logout() { store.set('customerToken', null); store.set('customer', null); token = me = null; show('login'); }
+
+let shopsTimer;
+const debouncedShops = () => { clearTimeout(shopsTimer); shopsTimer = setTimeout(loadShops, 250); };
+
+async function loadShops() {
+  const params = new URLSearchParams({ area: $('area').value, q: $('q').value.trim() });
+  const shops = await api('/api/market/shops?' + params);
+  $('shops').innerHTML = shops.map((s) => `
+    <button class="shop-card ${s.premium ? 'featured' : ''}" onclick="openShop('${s.id}')">
+      ${s.premium ? '<span class="badge premium">★ Featured</span> ' : ''}<span class="badge">${esc(s.category)}</span>
+      <h3 style="margin-top:8px">${esc(s.shopName)}</h3>
+      <div class="muted">${esc(s.area)} · ${s.items} items in stock</div>
+      <div class="muted">${s.delivery ? '🛵 Delivery or pickup' : '🛍️ Order ahead, pick up packed'}</div>
+    </button>`).join('') || '<p class="muted">No shops open here today. Try "All areas".</p>';
+}
+
+async function openShop(id) {
+  const r = await api('/api/market/shops/' + id);
+  if (shop?.id !== id) cart = {};
+  shop = r.shop; products = r.products;
+  show('shop');
+}
+
+function renderProducts() {
+  $('shopName').textContent = shop.shopName;
+  $('shopMeta').textContent = `${shop.area} · ${shop.ownerName} · ${shop.delivery ? 'Delivery or pickup' : 'Pickup only — order ahead, collect packed'}`;
+  const byCat = {};
+  for (const p of products) (byCat[p.category] ??= []).push(p);
+  $('products').innerHTML = Object.entries(byCat).map(([cat, list]) => `
+    <div class="card"><h3>${esc(cat)}</h3>${list.map((p) => `
+      <div class="product">
+        <div><div>${esc(p.name)}</div><div class="muted">${rupees(p.price)} / ${esc(p.unit)}
+          ${!p.inStock ? '<span class="low">· Out of stock</span>' : p.left ? `<span class="low">· Only ${p.left} left</span>` : ''}</div></div>
+        ${p.inStock ? `<div class="stepper">
+          <button class="secondary" onclick="addToCart('${p.id}', -1)">−</button>
+          <span style="min-width:20px;text-align:center">${cart[p.id] || 0}</span>
+          <button onclick="addToCart('${p.id}', 1)">+</button></div>` : ''}
+      </div>`).join('')}</div>`).join('');
+  renderCartBar();
+}
+
+function addToCart(id, d) {
+  const p = products.find((x) => x.id === id);
+  const next = Math.max(0, (cart[id] || 0) + d);
+  if (p.left && next > p.left) return toast(`Only ${p.left} left`);
+  if (next) cart[id] = next; else delete cart[id];
+  renderProducts();
+}
+
+function cartLines() { return Object.entries(cart).map(([id, qty]) => ({ ...products.find((p) => p.id === id), qty })); }
+function cartTotal() { return cartLines().reduce((t, l) => t + l.price * l.qty, 0); }
+
+function renderCartBar() {
+  const n = Object.values(cart).reduce((a, b) => a + b, 0);
+  $('cartBar').classList.toggle('hidden', !n);
+  $('cartTotal').textContent = rupees(cartTotal());
+  $('cartCount').textContent = `${n} item${n === 1 ? '' : 's'}`;
+}
+
+function renderCheckout() {
+  $('coShop').textContent = shop.shopName;
+  $('coLines').innerHTML = cartLines().map((l) => `<tr><td>${esc(l.name)}</td><td class="num">${l.qty} × ${rupees(l.price)}</td><td class="num">${rupees(l.qty * l.price)}</td></tr>`).join('');
+  $('coTotal').textContent = rupees(cartTotal());
+  $('delOpt').classList.toggle('hidden', !shop.delivery);
+  if (!shop.delivery) document.querySelector('input[name=ful][value=pickup]').checked = true;
+  syncCheckout();
+}
+
+function syncCheckout() {
+  $('address').classList.toggle('hidden', document.querySelector('input[name=ful]:checked').value !== 'delivery');
+}
+
+async function placeOrder() {
+  const btn = $('placeBtn');
+  btn.disabled = true;
+  try {
+    const r = await api('/api/orders', { ...auth(), body: {
+      shopId: shop.id,
+      items: Object.entries(cart).map(([productId, qty]) => ({ productId, qty })),
+      fulfilment: document.querySelector('input[name=ful]:checked').value,
+      address: $('address').value.trim(),
+      paymentMethod: document.querySelector('input[name=pay]:checked').value,
+    } });
+    cart = {};
+    toast('Order placed! The shop has been notified.');
+    if (r.paymentLink) openPayment(r.paymentLink, '/customer.html?orders=1');
+    show('orders');
+  } catch (err) {
+    if (err.status === 401) logout();
+  } finally { btn.disabled = false; }
+}
+
+const STEPS = { pickup: ['placed', 'accepted', 'ready', 'completed'], delivery: ['placed', 'accepted', 'out_for_delivery', 'completed'] };
+const STEP_LABEL = { placed: 'Sent to shop', accepted: 'Packing', ready: 'Ready for pickup', out_for_delivery: 'On the way', completed: 'Done' };
+
+async function loadOrders() {
+  let orders;
+  try { orders = await api('/api/customers/me/orders', auth()); } catch (err) { if (err.status === 401) logout(); return; }
+  $('orders').innerHTML = orders.map((o) => `
+    <div class="card">
+      <div class="row"><strong class="grow">${esc(o.shopName)}</strong><span class="badge ${o.status}">${esc(STEP_LABEL[o.status] || label(o.status))}</span></div>
+      <div class="muted">${when(o.at)} · ${o.fulfilment === 'delivery' ? 'Delivery' : 'Pickup'} · ${o.items.map((l) => `${esc(l.name)} ×${l.qty}`).join(', ')}</div>
+      ${o.status !== 'cancelled' ? `<div class="muted" style="margin:6px 0">${STEPS[o.fulfilment].map((s) => STEPS[o.fulfilment].indexOf(s) <= STEPS[o.fulfilment].indexOf(o.status) ? `<strong>${STEP_LABEL[s]}</strong>` : STEP_LABEL[s]).join(' → ')}</div>` : ''}
+      <div class="row"><strong class="grow">${rupees(o.total)}</strong>
+        <span class="badge ${o.paymentStatus}">${o.paymentStatus === 'on_khata' ? 'on khata' : label(o.paymentMethod === 'pay_at_shop' && o.paymentStatus === 'pending' ? 'pay at shop' : o.paymentStatus)}</span>
+        ${o.paymentLink && o.status !== 'cancelled' ? `<button class="small" onclick="openPayment('${esc(o.paymentLink)}', '/customer.html?orders=1')">Pay now</button>` : ''}
+        ${o.status === 'placed' ? `<button class="small secondary" onclick="cancelOrder('${o.id}')">Cancel</button>` : ''}</div>
+    </div>`).join('') || '<p class="muted">No orders yet.</p>';
+}
+
+async function cancelOrder(id) { await api(`/api/orders/${id}/cancel`, { ...auth(), body: {} }); loadOrders(); }
+
+init();
+setInterval(() => !$('v-orders').classList.contains('hidden') && loadOrders(), 10000);
+</script>
+</body>
+</html>

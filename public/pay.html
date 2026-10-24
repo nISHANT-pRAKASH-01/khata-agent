@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Payment — Khata Agent</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<main>
+  <div class="card" style="max-width:420px;margin:40px auto;text-align:center">
+    <p class="badge pending">Test mode: Pine Labs keys not connected</p>
+    <h2 id="desc" style="margin-top:12px"></h2>
+    <div class="stat" id="amount"></div>
+    <p class="muted" id="status"></p>
+    <button class="block" id="payBtn" onclick="pay()">Simulate successful payment</button>
+    <p><a id="back" href="/">← Back</a></p>
+  </div>
+</main>
+<script src="/common.js"></script>
+<script>
+const params = new URLSearchParams(location.search);
+const pid = params.get('id');
+const back = params.get('back') || '/';
+$('back').href = back.startsWith('/') ? back : '/';
+
+async function load() {
+  const p = await api('/api/payments/' + encodeURIComponent(pid));
+  $('desc').textContent = p.description;
+  $('amount').textContent = rupees(p.amount);
+  $('status').textContent = p.status === 'paid' ? 'Paid ✓' : 'Waiting for payment';
+  $('payBtn').classList.toggle('hidden', p.status === 'paid');
+}
+
+async function pay() {
+  await api(`/api/payments/${encodeURIComponent(pid)}/test-pay`, { body: {} });
+  toast('Payment received');
+  await load();
+  setTimeout(() => { location.href = $('back').href; }, 1200);
+}
+
+load();
+</script>
+</body>
+</html>

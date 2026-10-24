@@ -3,138 +3,54 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Khata Agent</title>
-<style>
-  :root { --bg:#f6f7f9; --card:#fff; --text:#1a1d23; --muted:#667085; --brand:#5b3df5; --ok:#12805c; --bad:#b42318; --line:#e4e7ec; }
-  * { box-sizing: border-box; }
-  body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--text); }
-  main { max-width: 720px; margin: 0 auto; padding: 16px; }
-  h1 { font-size: 1.5rem; margin: 8px 0 4px; }
-  h2 { font-size: 1.1rem; margin: 0 0 12px; }
-  .muted { color: var(--muted); font-size: .9rem; }
-  .card { background: var(--card); border:1px solid var(--line); border-radius: 12px; padding: 16px; margin: 16px 0; }
-  input, select, textarea, button { font: inherit; padding: 10px; border-radius: 8px; border:1px solid var(--line); width:100%; margin: 4px 0; }
-  button { background: var(--brand); color:#fff; border:none; cursor:pointer; font-weight:600; }
-  button.secondary { background:#fff; color:var(--text); border:1px solid var(--line); }
-  button.danger { background: var(--bad); }
-  .row { display:flex; gap:8px; } .row > * { flex:1; }
-  table { width:100%; border-collapse: collapse; }
-  td, th { text-align:left; padding:8px 4px; border-bottom:1px solid var(--line); font-size:.95rem; }
-  .badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:.8rem; background:#eef; }
-  .pending { background:#fff4d6; } .approved { background:#e0f2ff; } .paid { background:#dcfae6; } .rejected { background:#fee4e2; }
-  a { color: var(--brand); }
-  .hidden { display:none; }
-</style>
+<title>Khata Agent — your local dukaan, online</title>
+<link rel="stylesheet" href="/styles.css">
 </head>
 <body>
+<header class="top"><div class="bar">
+  <a class="logo" href="/">Khata<span>Agent</span></a><span class="spacer"></span>
+  <a href="/logs.html" class="muted">Activity log</a>
+</div></header>
 <main>
-  <h1>Khata Agent</h1>
-  <p class="muted">Your digital khata. An AI agent drafts udhaar reminders; you approve every one before it goes out, with a Pine Labs payment link.</p>
-
-  <section id="signup" class="card hidden">
-    <h2>Start your free khata</h2>
-    <input id="ownerName" placeholder="Your name">
-    <input id="shopName" placeholder="Shop name">
-    <input id="phone" placeholder="Phone number" inputmode="tel">
-    <button onclick="signup()">Sign up</button>
+  <section class="hero">
+    <h1>Order from the kirana next door.</h1>
+    <p class="muted">Local shops put their shelves online. You order, they pack it, you pay with Pine Labs, at the counter, or on khata. Their AI munshi handles the udhaar reminders, and the shopkeeper approves every one.</p>
   </section>
 
-  <section id="app" class="hidden">
-    <p><strong id="shopTitle"></strong> · <a href="#" onclick="logout()">switch shop</a> · <a href="/logs.html">activity log</a></p>
-
+  <div class="grid two">
     <div class="card">
-      <h2>Add to khata</h2>
-      <div class="row">
-        <input id="cName" placeholder="Customer name">
-        <input id="cPhone" placeholder="Customer phone" inputmode="tel">
-      </div>
-      <div class="row">
-        <input id="amount" type="number" min="1" placeholder="Amount ₹">
-        <select id="type"><option value="credit">Took on credit (udhaar)</option><option value="payment">Paid back</option></select>
-      </div>
-      <input id="note" placeholder="Note (optional) e.g. rice, oil">
-      <button onclick="addEntry()">Save</button>
+      <h2>🛒 I want to shop</h2>
+      <p class="muted">Find shops in your area, build a cart, and pick it up packed or get it delivered from Premium shops.</p>
+      <button class="block" onclick="location.href='/customer.html'">Browse shops near me</button>
     </div>
-
     <div class="card">
-      <h2>Agent drafts waiting for you</h2>
-      <button id="runAgent" onclick="runAgent()">Ask Khata Munshi to check dues</button>
-      <div id="reminders"></div>
+      <h2>🏪 I own a shop</h2>
+      <p class="muted">Put your inventory online, take orders, bill walk-in customers, and keep your khata. Stock updates itself as you sell.</p>
+      <button class="block" onclick="location.href='/owner.html'">Open my shop dashboard</button>
     </div>
+  </div>
 
-    <div class="card">
-      <h2>Who owes what</h2>
-      <table><thead><tr><th>Customer</th><th>Balance</th></tr></thead><tbody id="balances"></tbody></table>
+  <h2 style="margin-top:24px">Plans for shop owners</h2>
+  <div class="grid two">
+    <div class="card plan">
+      <h3>Day pass</h3>
+      <div class="price">₹100 <span class="muted">/ day</span></div>
+      <ul class="muted">
+        <li>Listed in your area for today</li>
+        <li>Customers order ahead; you pack, they walk in and pick up</li>
+        <li>Inventory, billing, khata and the AI munshi</li>
+      </ul>
     </div>
-  </section>
+    <div class="card plan best">
+      <h3>Premium <span class="badge premium">Most reach</span></h3>
+      <div class="price">₹5,000 <span class="muted">/ month</span></div>
+      <ul class="muted">
+        <li>Featured at the top in <strong>every</strong> area</li>
+        <li>Home delivery orders</li>
+        <li>Insights: top sellers, sales trend, repeat customers, shop views, and what to restock first</li>
+      </ul>
+    </div>
+  </div>
 </main>
-<script>
-const $ = (id) => document.getElementById(id);
-const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
-let shopId = null;
-try { shopId = localStorage.getItem('shopId'); } catch {}
-
-async function api(path, body) {
-  const res = await fetch(path, body ? { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) } : {});
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) { alert(data.error || 'Something went wrong'); throw new Error(data.error); }
-  return data;
-}
-
-async function signup() {
-  const shop = await api('/api/signup', { ownerName: $('ownerName').value, shopName: $('shopName').value, phone: $('phone').value });
-  shopId = shop.id;
-  try { localStorage.setItem('shopId', shopId); } catch {}
-  render();
-}
-
-function logout() { try { localStorage.removeItem('shopId'); } catch {} shopId = null; render(); }
-
-async function addEntry() {
-  await api(`/api/shops/${shopId}/entries`, { customerName: $('cName').value, customerPhone: $('cPhone').value, amount: Number($('amount').value), type: $('type').value, note: $('note').value });
-  ['cName','cPhone','amount','note'].forEach((f) => $(f).value = '');
-  render();
-}
-
-async function runAgent() {
-  const btn = $('runAgent');
-  btn.disabled = true; btn.textContent = 'Agent is working…';
-  try { await api(`/api/shops/${shopId}/run-agent`, {}); } finally { btn.disabled = false; btn.textContent = 'Ask Khata Munshi to check dues'; render(); }
-}
-
-async function approve(id) { await api(`/api/reminders/${id}/approve`, { message: $(`msg-${id}`).value }); render(); }
-async function reject(id) { await api(`/api/reminders/${id}/reject`, { reason: 'shopkeeper rejected' }); render(); }
-async function markPaid(id) { await api(`/api/reminders/${id}/mark-paid`, {}); render(); }
-
-function waLink(r) {
-  const phone = r.customerPhone.replace(/\D/g, '').replace(/^(\d{10})$/, '91$1');
-  return `https://wa.me/${phone}?text=${encodeURIComponent(`${r.message}\n\nPay here: ${r.paymentLink}`)}`;
-}
-
-function reminderHtml(r) {
-  const head = `<p><span class="badge ${r.status}">${r.status}</span> <strong>${esc(r.customerName)}</strong> · ₹${r.amount}</p>`;
-  if (r.status === 'pending') return `<div class="card">${head}
-    <textarea id="msg-${r.id}" rows="3">${esc(r.message)}</textarea>
-    <div class="row"><button onclick="approve('${r.id}')">Approve &amp; create payment link</button><button class="danger" onclick="reject('${r.id}')">Reject</button></div></div>`;
-  if (r.status === 'approved') return `<div class="card">${head}<p class="muted">${esc(r.message)}</p>
-    <div class="row"><a href="${esc(waLink(r))}" target="_blank"><button>Send on WhatsApp</button></a><button class="secondary" onclick="markPaid('${r.id}')">Mark paid</button></div>
-    <p class="muted">Link: <a href="${esc(r.paymentLink)}" target="_blank">${esc(r.paymentLink)}</a></p></div>`;
-  return `<div class="card">${head}<p class="muted">${esc(r.message)}</p></div>`;
-}
-
-async function render() {
-  $('signup').classList.toggle('hidden', !!shopId);
-  $('app').classList.toggle('hidden', !shopId);
-  if (!shopId) return;
-  let data;
-  try { data = await api(`/api/shops/${shopId}`); } catch { return logout(); }
-  $('shopTitle').textContent = `${data.shop.shopName} (${data.shop.ownerName})`;
-  $('balances').innerHTML = data.balances.map((b) => `<tr><td>${esc(b.customerName)}<br><span class="muted">${esc(b.customerPhone)}</span></td><td>₹${b.balance}</td></tr>`).join('') || '<tr><td colspan="2" class="muted">No entries yet</td></tr>';
-  $('reminders').innerHTML = data.reminders.map(reminderHtml).join('') || '<p class="muted">No drafts yet. The agent checks dues and drafts reminders for you.</p>';
-}
-
-render();
-setInterval(() => shopId && document.activeElement?.tagName !== 'TEXTAREA' && render(), 15000);
-</script>
 </body>
 </html>

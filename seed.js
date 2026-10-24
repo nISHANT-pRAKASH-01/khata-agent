@@ -1,0 +1,100 @@
+// Mock marketplace data so the app is usable on first boot. Everything here is flagged
+// `mock: true` and never written to the activity log, so it can't be mistaken for real users.
+const DAY = 86400000;
+
+// Deterministic pseudo-random so every fresh boot has the same demo data.
+let s = 42;
+const rand = () => ((s = (s * 16807) % 2147483647) / 2147483647);
+const pick = (arr) => arr[Math.floor(rand() * arr.length)];
+
+const CATALOG = {
+  kirana: [
+    ['Aashirvaad Atta 5kg', 'Staples', 'pack', 265], ['India Gate Basmati 1kg', 'Staples', 'pack', 140],
+    ['Toor Dal 1kg', 'Staples', 'kg', 160], ['Fortune Sunflower Oil 1L', 'Staples', 'bottle', 155],
+    ['Tata Salt 1kg', 'Staples', 'pack', 28], ['Sugar 1kg', 'Staples', 'kg', 46],
+    ['Amul Taaza Milk 500ml', 'Dairy', 'pouch', 28], ['Amul Butter 100g', 'Dairy', 'pack', 58],
+    ['Parle-G 250g', 'Snacks', 'pack', 25], ['Maggi Noodles 4-pack', 'Snacks', 'pack', 56],
+    ['Tata Tea Gold 250g', 'Beverages', 'pack', 150], ['Surf Excel 1kg', 'Household', 'pack', 140],
+  ],
+  fresh: [
+    ['Onion 1kg', 'Vegetables', 'kg', 40], ['Potato 1kg', 'Vegetables', 'kg', 30],
+    ['Tomato 1kg', 'Vegetables', 'kg', 36], ['Banana (dozen)', 'Fruits', 'dozen', 60],
+    ['Apple Shimla 1kg', 'Fruits', 'kg', 180], ['Coriander bunch', 'Vegetables', 'bunch', 10],
+    ['Green Chilli 250g', 'Vegetables', 'pack', 15], ['Paneer 200g', 'Dairy', 'pack', 90],
+  ],
+  medical: [
+    ['Dolo 650 (strip)', 'Medicines', 'strip', 32], ['Vicks VapoRub 50ml', 'Personal care', 'jar', 145],
+    ['Dettol Antiseptic 125ml', 'First aid', 'bottle', 75], ['Band-Aid (20)', 'First aid', 'box', 50],
+    ['ORS sachet', 'Medicines', 'sachet', 21], ['Hand sanitiser 200ml', 'Personal care', 'bottle', 99],
+  ],
+};
+
+const SHOPS = [
+  { shopName: 'Sharma General Store', ownerName: 'Rakesh Sharma', phone: '9810000001', area: 'Indiranagar', category: 'kirana', plan: 'premium' },
+  { shopName: 'Gupta Kirana', ownerName: 'Sunita Gupta', phone: '9810000002', area: 'Koramangala', category: 'kirana', plan: 'day' },
+  { shopName: 'Fresh Mandi', ownerName: 'Imran Khan', phone: '9810000003', area: 'Indiranagar', category: 'fresh', plan: 'premium' },
+  { shopName: 'Apna Medical', ownerName: 'Deepa Nair', phone: '9810000004', area: 'HSR Layout', category: 'medical', plan: 'day' },
+  { shopName: 'Balaji Provisions', ownerName: 'Venkat Rao', phone: '9810000005', area: 'HSR Layout', category: 'kirana', plan: 'day' },
+];
+
+const CUSTOMERS = [
+  ['Ramesh', '9900000011'], ['Priya', '9900000012'], ['Arjun', '9900000013'],
+  ['Meena', '9900000014'], ['Farhan', '9900000015'], ['Kavya', '9900000016'],
+];
+
+export function seed({ id, endOfDayIST }) {
+  const now = Date.now();
+  const db = { shops: [], customers: [], products: [], orders: [], payments: [], stockMoves: [], views: [], entries: [], reminders: [], logs: [] };
+
+  for (const c of CUSTOMERS) db.customers.push({ id: id(), name: c[0], phone: c[1], area: pick(SHOPS).area, mock: true, at: new Date(now - 40 * DAY).toISOString() });
+
+  for (const sh of SHOPS) {
+    const validUntil = sh.plan === 'premium' ? new Date(now + 30 * DAY) : endOfDayIST(new Date(now));
+    const shop = {
+      id: id(), shopName: sh.shopName, ownerName: sh.ownerName, phone: sh.phone, pin: '1234', area: sh.area, category: sh.category,
+      plan: { type: sh.plan, validUntil: validUntil.toISOString() }, mock: true, at: new Date(now - 45 * DAY).toISOString(),
+    };
+    db.shops.push(shop);
+    const products = CATALOG[sh.category].map(([name, category, unit, price]) => ({
+      id: id(), shopId: shop.id, name, category, unit, price, stock: 5 + Math.floor(rand() * 40), lowStockAt: 5, mock: true,
+    }));
+    // A couple of items start low so the low-stock alert has something to show.
+    products[1].stock = 3;
+    products[4].stock = 0;
+    db.products.push(...products);
+
+    // Past orders (online + walk-in) so the premium insights have history.
+    const nOrders = sh.plan === 'premium' ? 70 : 15;
+    for (let i = 0; i < nOrders; i++) {
+      const at = new Date(now - Math.floor(rand() * 30 * DAY));
+      const lines = [];
+      for (let j = 0, n = 1 + Math.floor(rand() * 3); j < n; j++) {
+        // Skew towards the first few products so "top sellers" is meaningful.
+        const p = products[Math.floor(rand() * rand() * products.length)];
+        if (lines.some((l) => l.productId === p.id)) continue;
+        lines.push({ productId: p.id, name: p.name, price: p.price, qty: 1 + Math.floor(rand() * 3) });
+      }
+      const cust = pick(db.customers);
+      const walkIn = rand() < 0.4;
+      db.orders.push({
+        id: id(), shopId: shop.id, channel: walkIn ? 'walk_in' : 'online',
+        customerId: walkIn ? null : cust.id, customerName: cust.name, customerPhone: cust.phone,
+        items: lines, total: lines.reduce((t, l) => t + l.price * l.qty, 0),
+        fulfilment: walkIn ? 'counter' : (sh.plan === 'premium' && rand() < 0.5 ? 'delivery' : 'pickup'),
+        paymentMethod: pick(['online', 'pay_at_shop', 'khata']), paymentStatus: 'paid', status: 'completed',
+        mock: true, at: at.toISOString(),
+      });
+    }
+    for (let i = 0; i < (sh.plan === 'premium' ? 400 : 60); i++) {
+      db.views.push({ shopId: shop.id, mock: true, at: new Date(now - Math.floor(rand() * 30 * DAY)).toISOString() });
+    }
+  }
+
+  // Some open udhaar so the khata agent has dues to work on.
+  for (const shop of db.shops) {
+    for (const c of db.customers.slice(0, 3)) {
+      db.entries.push({ id: id(), shopId: shop.id, customerName: c.name, customerPhone: c.phone, amount: 150 + Math.floor(rand() * 900), type: 'credit', note: 'Monthly ration', mock: true, at: new Date(now - Math.floor(rand() * 20 * DAY)).toISOString() });
+    }
+  }
+  return db;
+}
