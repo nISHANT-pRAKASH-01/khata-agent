@@ -1574,7 +1574,14 @@ app.post('/mcp', agentAuth, async (req, res) => {
   await server.connect(transport);
   await transport.handleRequest(req, res, req.body);
 });
-app.all('/mcp', (req, res) => res.status(405).json({ error: 'Use POST' }));
+// MCP clients open GET with Accept: text/event-stream (we don't stream, so 405 as the spec allows).
+// Anything else, e.g. a connector health check, gets a plain OK.
+app.all('/mcp', (req, res) => {
+  if (req.method === 'GET' && !String(req.get('accept') || '').includes('text/event-stream')) {
+    return res.json({ ok: true, server: 'uncle-store', transport: 'streamable-http', tools: 7 });
+  }
+  res.status(405).json({ error: 'Use POST' });
+});
 
 // Public proof log; phone numbers and emails are masked.
 app.get('/api/logs', (req, res) => {
