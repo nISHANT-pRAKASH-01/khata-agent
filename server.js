@@ -1497,22 +1497,26 @@ const agentAuth = (req, res, next) =>
     ? next()
     : res.status(401).json({ error: 'Bad API key' });
 
+// Agents often send null, "" or numbers as strings for optional fields; accept all of those.
+const optText = () => z.union([z.string(), z.number(), z.null()]).optional().transform((v) => (v == null || v === '' ? undefined : String(v)));
+const optNum = () => z.union([z.number(), z.string(), z.null()]).optional().transform((v) => (v == null || v === '' || !Number.isFinite(Number(v)) ? undefined : Number(v)));
+
 // Remote MCP (Streamable HTTP, stateless) — register in AgenticOrg under Connectors > Remote MCP.
 function buildMcpServer() {
   const server = new McpServer({ name: 'uncle-store', version: '2.0.0' });
   const asText = (data) => ({ content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] });
   server.registerTool('get_low_stock', {
     description: 'List products that are at or below their low-stock level, per shop. Pass shopId to check one shop.',
-    inputSchema: { shopId: z.string().optional().describe('Only this shop') },
+    inputSchema: { shopId: optText().describe('Only this shop') },
     annotations: { readOnlyHint: true },
   }, async ({ shopId }) => asText(getLowStock(shopId)));
   server.registerTool('find_shops_for_list', {
     description: 'Shopping assistant: given a customer\'s shopping list (already split into items), return up to 3 nearby open shops ranked by how many items they have in stock, then distance, then price. Pass the requestId you were given so the app can show the result to the customer.',
     inputSchema: {
-      requestId: z.string().optional().describe('requestId from the task inputs'),
-      area: z.string().optional().describe('Customer area, e.g. Indiranagar'),
-      lat: z.number().optional(), lng: z.number().optional(),
-      items: z.array(z.object({ name: z.string().describe('Item in plain English, e.g. "atta", "milk", "sunflower oil"'), qty: z.number().optional() })).describe('Items to find'),
+      requestId: optText().describe('requestId from the task inputs, if given'),
+      area: optText().describe('Customer area, e.g. Indiranagar, if known'),
+      lat: optNum(), lng: optNum(),
+      items: z.array(z.object({ name: z.string().describe('Item in plain English, e.g. "atta", "milk", "sunflower oil"'), qty: optNum() })).describe('Items to find'),
     },
     annotations: { readOnlyHint: true },
   }, async ({ requestId, area, lat, lng, items }) => {
@@ -1524,7 +1528,7 @@ function buildMcpServer() {
   });
   server.registerTool('get_area_demand', {
     description: 'Demand advisor: area-level demand for the last N days: top products by quantity, rising products (growth vs the previous period), category totals, and items shoppers searched for that no shop had. Aggregates only; no customer data.',
-    inputSchema: { area: z.string().describe('Area name, e.g. Indiranagar'), days: z.number().optional().describe('Window in days (default 14)') },
+    inputSchema: { area: optText().describe('Area name, e.g. Indiranagar'), days: optNum().describe('Window in days (default 14)') },
     annotations: { readOnlyHint: true },
   }, async ({ area, days }) => asText(areaDemand(area, Math.max(1, Math.min(Number(days) || 14, 60)))));
   server.registerTool('get_shop_inventory', {
