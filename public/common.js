@@ -101,6 +101,69 @@ function travelText(km) {
 }
 const directionsUrl = (p) => `https://www.google.com/maps/dir/?api=1&destination=${p.lat},${p.lng}`;
 
+// Shop location picker: search any place (OpenStreetMap), or use GPS, then drag the pin to the exact spot.
+// Needs Leaflet on the page. Returns { value() } -> { location, area }.
+function locationPicker(el, { initial, area } = {}) {
+  let pin = initial && Number.isFinite(initial.lat) ? { lat: initial.lat, lng: initial.lng } : null;
+  let areaEdited = Boolean(area), map, marker, timer;
+  el.innerHTML = `
+    <div class="row"><input class="lp-q grow" placeholder="Type area or address, e.g. Whitefield, Bengaluru" autocomplete="off">
+      <button type="button" class="small secondary lp-gps">📍 I'm at my shop</button></div>
+    <div class="lp-results"></div>
+    <div class="lp-map hidden" style="height:240px;border-radius:12px;margin-top:8px"></div>
+    <p class="muted lp-hint hidden">Drag the pin to your shop's exact spot.</p>
+    <label>Area name (shown to customers)</label><input class="lp-area" placeholder="e.g. Whitefield">`;
+  const q = el.querySelector('.lp-q'), results = el.querySelector('.lp-results'), areaInput = el.querySelector('.lp-area');
+  areaInput.value = area || '';
+  areaInput.oninput = () => { areaEdited = true; };
+  const lookupArea = async () => {
+    if (areaEdited) return;
+    try { const p = await api(`/api/geo/reverse?lat=${pin.lat}&lng=${pin.lng}`); if (p.area && !areaEdited) areaInput.value = p.area; } catch {}
+  };
+  const place = (lat, lng, zoom = 16) => {
+    pin = { lat, lng };
+    el.querySelector('.lp-map').classList.remove('hidden');
+    el.querySelector('.lp-hint').classList.remove('hidden');
+    if (!map) {
+      map = L.map(el.querySelector('.lp-map'));
+      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
+      marker = L.marker([lat, lng], { draggable: true }).addTo(map);
+      marker.on('dragend', () => { const p = marker.getLatLng(); pin = { lat: p.lat, lng: p.lng }; lookupArea(); });
+      map.on('click', (e) => { marker.setLatLng(e.latlng); pin = { lat: e.latlng.lat, lng: e.latlng.lng }; lookupArea(); });
+    }
+    marker.setLatLng([lat, lng]);
+    map.setView([lat, lng], zoom);
+    setTimeout(() => map.invalidateSize(), 50);
+  };
+  q.oninput = () => {
+    clearTimeout(timer);
+    const text = q.value.trim();
+    if (text.length < 3) { results.innerHTML = ''; return; }
+    timer = setTimeout(async () => {
+      results.innerHTML = '<p class="muted">Searching…</p>';
+      try {
+        const list = await api('/api/geo/search?q=' + encodeURIComponent(text));
+        results.innerHTML = list.map((p, i) => `<button type="button" class="ghost small lp-r" data-i="${i}" style="display:block;text-align:left;width:100%">📍 ${esc(p.label)}</button>`).join('')
+          || '<p class="muted">No match. Try adding the city, e.g. "Whitefield, Bengaluru".</p>';
+        results.querySelectorAll('.lp-r').forEach((b) => b.onclick = () => {
+          const p = list[b.dataset.i];
+          q.value = p.label; results.innerHTML = '';
+          if (!areaEdited) areaInput.value = p.area;
+          place(p.lat, p.lng);
+        });
+      } catch { results.innerHTML = ''; }
+    }, 600);
+  };
+  el.querySelector('.lp-gps').onclick = () => {
+    if (!navigator.geolocation) return toast('Location not available on this device');
+    toast('Finding your location…');
+    navigator.geolocation.getCurrentPosition((p) => { place(p.coords.latitude, p.coords.longitude, 17); lookupArea(); },
+      () => toast('Could not get your location. Search for your area instead.'), { enableHighAccuracy: true, timeout: 15000 });
+  };
+  if (pin) place(pin.lat, pin.lng);
+  return { value: () => ({ location: pin, area: areaInput.value.trim() }) };
+}
+
 // Opens a payment link: Pine Labs in a new tab, the test page in the same tab.
 function openPayment(link, back = location.pathname) {
   if (!link) return;

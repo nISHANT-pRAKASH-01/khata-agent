@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>My shop — Uncle Store</title>
 <link rel="stylesheet" href="/styles.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 </head>
 <body>
 <header class="top"><div class="bar">
@@ -31,11 +33,11 @@
       <p class="muted" id="regWho"></p>
       <label>Shop name</label><input id="suShop">
       <div class="row">
-        <div class="grow"><label>Area</label><input id="suArea" list="areas" placeholder="e.g. Indiranagar"><datalist id="areas"></datalist></div>
         <div class="grow"><label>Type</label><select id="suCat"><option value="kirana">Kirana</option><option value="fresh">Fruits &amp; veg</option><option value="medical">Medical</option><option value="other">Other</option></select></div>
+        <div class="grow"><label>Shop phone (WhatsApp)</label><input id="suPhone" inputmode="numeric" maxlength="10"></div>
       </div>
-      <label>Shop phone (WhatsApp)</label><input id="suPhone" inputmode="numeric" maxlength="10">
-      <button class="small secondary" style="margin-top:6px" onclick="pinShop()">📍 I'm at my shop: use this location</button> <span class="muted" id="suLoc"></span>
+      <h3 style="margin-top:16px">Where is your shop?</h3>
+      <div id="suPicker"></div>
       <button class="block" style="margin-top:12px" onclick="signup()">Register shop</button>
     </div>
 
@@ -177,7 +179,13 @@
     <div id="t-insights" class="tab"><div id="insights"></div></div>
 
     <div id="t-plan" class="tab">
-      <div class="grid two" style="margin-top:12px">
+      <div class="card" style="margin-top:12px">
+        <h3>📍 Shop location</h3>
+        <p class="muted">Customers see how far you are and get directions from this pin. Search, use GPS, or drag the pin.</p>
+        <div id="editPicker"></div>
+        <button style="margin-top:8px" onclick="saveLocation()">Save location</button>
+      </div>
+      <div class="grid two">
         <div class="card plan">
           <h3>Day pass</h3>
           <div class="price">₹100 <span class="muted">/ day</span></div>
@@ -204,12 +212,13 @@ const call = async (path, opts) => {
 };
 
 // ---- auth ----
-let ticket = null, shopPin = null;
+let ticket = null, shopPicker = null;
 function onSignedIn(r) {
   if (r.needsShop) {
     ticket = r.ticket;
     $('regWho').textContent = `Signed in as ${r.name} (${r.email})`;
     $('signinCard').classList.add('hidden'); $('registerCard').classList.remove('hidden');
+    shopPicker = locationPicker($('suPicker'));
     return;
   }
   token = r.token; store.set('ownerToken', token); start();
@@ -217,16 +226,13 @@ function onSignedIn(r) {
 async function demoLogin() {
   onSignedIn(await api('/api/owner/demo-login', { body: { phone: $('liPhone').value.trim(), pin: $('liPin').value.trim() } }));
 }
-function pinShop() {
-  if (!navigator.geolocation) return toast('Location not available');
-  $('suLoc').textContent = 'Finding you…';
-  navigator.geolocation.getCurrentPosition((p) => { shopPin = { lat: p.coords.latitude, lng: p.coords.longitude }; $('suLoc').textContent = '✓ Pinned'; },
-    () => { $('suLoc').textContent = 'Could not get location; we\'ll use your area.'; }, { enableHighAccuracy: true, timeout: 10000 });
-}
 async function signup() {
+  const where = shopPicker.value();
+  if (!where.location) return toast('Set your shop location: search for it or tap "I\'m at my shop"');
+  if (!where.area) return toast('Enter the area name customers will see');
   const r = await api('/api/owner/signup', { body: {
-    ticket, shopName: $('suShop').value.trim(), area: $('suArea').value.trim(),
-    category: $('suCat').value, phone: $('suPhone').value.trim(), location: shopPin,
+    ticket, shopName: $('suShop').value.trim(), area: where.area,
+    category: $('suCat').value, phone: $('suPhone').value.trim(), location: where.location,
   } });
   token = r.token; store.set('ownerToken', token); tab = 'plan'; start();
 }
@@ -236,8 +242,6 @@ async function showAuth() {
   $('v-auth').classList.remove('hidden'); $('v-app').classList.add('hidden');
   $('signinCard').classList.remove('hidden'); $('registerCard').classList.add('hidden');
   $('who').textContent = ''; $('logoutBtn').classList.add('hidden');
-  const areas = await api('/api/areas');
-  $('areas').innerHTML = areas.map((a) => `<option value="${esc(a)}">`).join('');
   $('signin').innerHTML = '';
   mountSignIn($('signin'), 'owner', onSignedIn);
   api('/api/config').then((cfg) => $('demoBox').classList.toggle('hidden', !cfg.demoMode));
@@ -273,7 +277,7 @@ function setTab(t) {
   tab = t; store.set('ownerTab', t);
   document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('active', b.dataset.tab === t));
   document.querySelectorAll('.tab').forEach((el) => el.classList.toggle('hidden', el.id !== 't-' + t));
-  ({ orders: loadOrders, inventory: loadInventory, billing: loadBilling, customers: loadCustomers, coach: loadCoach, insights: loadInsights, plan: () => {} })[t]();
+  ({ orders: loadOrders, inventory: loadInventory, billing: loadBilling, customers: loadCustomers, coach: loadCoach, insights: loadInsights, plan: loadPlanTab })[t]();
 }
 document.querySelectorAll('#tabs button').forEach((b) => b.onclick = () => setTab(b.dataset.tab));
 
@@ -643,6 +647,14 @@ async function askCoach() {
 }
 
 // ---- plans ----
+let editPicker = null;
+function loadPlanTab() { editPicker = locationPicker($('editPicker'), { initial: { lat: me.lat, lng: me.lng }, area: me.area }); }
+async function saveLocation() {
+  const where = editPicker.value();
+  if (!where.location) return toast('Pick your shop location first');
+  await call('/api/owner/shop', { method: 'PATCH', body: where });
+  toast('Location saved'); refreshMe();
+}
 async function buyPlan(plan) {
   const r = await call('/api/owner/plan', { body: { plan } });
   openPayment(r.paymentLink);

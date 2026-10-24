@@ -57,6 +57,15 @@ const publicShop = (s) => ({
 });
 const privateShop = (s) => ({ ...publicShop(s), ownerName: s.ownerName, phone: s.phone, email: s.email, plan: s.plan, planActive: planActive(s) });
 const shopOf = (o) => db.shops.find((s) => s.id === o.shopId);
+// Centre of an area: the built-in demo areas, otherwise the average position of shops registered there.
+function areaCenter(area) {
+  if (!area) return null;
+  if (AREA_CENTERS[area]) return AREA_CENTERS[area];
+  const pins = db.shops.filter((s) => s.area?.toLowerCase() === String(area).toLowerCase() && Number.isFinite(s.lat));
+  return pins.length ? { lat: pins.reduce((t, s) => t + s.lat, 0) / pins.length, lng: pins.reduce((t, s) => t + s.lng, 0) / pins.length } : null;
+}
+const allAreaCenters = () => Object.fromEntries([...new Set([...Object.keys(AREA_CENTERS), ...db.shops.map((s) => s.area)].filter(Boolean))]
+  .map((a) => [a, areaCenter(a)]).filter(([, c]) => c));
 const validPoint = (p) => p && Number.isFinite(p.lat) && Number.isFinite(p.lng) && Math.abs(p.lat) <= 90 && Math.abs(p.lng) <= 180;
 
 // ---- Email (fire-and-forget; never blocks or fails an order) ----
@@ -189,7 +198,7 @@ const baseUrl = (req) => process.env.PUBLIC_URL?.replace(/\/$/, '') || `${req.pr
 
 app.get('/api/config', (req, res) => res.json({
   paymentsLive: pinelabs.isConfigured(), emailOn: mailer.isConfigured(),
-  googleClientId: process.env.GOOGLE_CLIENT_ID || null, demoMode: process.env.DEMO_MODE === '1', plans: PLANS, areas: AREA_CENTERS,
+  googleClientId: process.env.GOOGLE_CLIENT_ID || null, demoMode: process.env.DEMO_MODE === '1', plans: PLANS, areas: allAreaCenters(),
 }));
 
 // ---- Accounts: email + password, and "Sign in with Google" when GOOGLE_CLIENT_ID is set ----
@@ -280,7 +289,45 @@ app.patch('/api/customers/me', customerAuth, (req, res) => {
   res.json(customerView(req.customer));
 });
 
-app.get('/api/areas', (req, res) => res.json([...new Set([...Object.keys(AREA_CENTERS), ...db.shops.map((s) => s.area)].filter(Boolean))].sort()));
+app.get('/api/areas', (req, res) => res.json(Object.keys(allAreaCenters()).sort()));
+
+// ---- Place search for pinning a shop (OpenStreetMap Nominatim: free, max 1 request/second) ----
+const geoCache = new Map();
+let geoLast = 0;
+async function nominatim(path) {
+  if (geoCache.has(path)) return geoCache.get(path);
+  const wait = geoLast + 1100 - Date.now();
+  geoLast = Date.now() + Math.max(0, wait);
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  const r = await fetch(`https://nominatim.openstreetmap.org/${path}`, {
+    headers: { 'User-Agent': 'UncleStore/1.0 (local shops marketplace)', 'Accept-Language': 'en' },
+    signal: AbortSignal.timeout(8000),
+  }).catch(() => fail(502, 'Place search is not reachable right now. Use the map or "I\'m at my shop".'));
+  if (!r.ok) fail(502, 'Place search is busy. Try again in a moment, or use the map.');
+  const data = await r.json();
+  geoCache.set(path, data);
+  return data;
+}
+const areaName = (a = {}) => a.suburb || a.neighbourhood || a.quarter || a.city_district || a.village || a.town || a.city || a.county || '';
+const AREA_TYPES = ['suburb', 'neighbourhood', 'quarter', 'city_district', 'village', 'town', 'residential'];
+const placeOf = (x) => ({
+  label: x.display_name, area: (AREA_TYPES.includes(x.addresstype) && x.name) || areaName(x.address) || x.name || x.display_name.split(',')[0],
+  city: x.address?.city || x.address?.town || x.address?.state_district || '', lat: Number(x.lat), lng: Number(x.lon),
+});
+
+app.get('/api/geo/search', async (req, res) => {
+  const q = String(req.query.q || '').trim().slice(0, 120);
+  if (q.length < 3) return res.json([]);
+  const data = await nominatim(`search?format=jsonv2&addressdetails=1&limit=6&countrycodes=in&q=${encodeURIComponent(q)}`);
+  res.json(data.map(placeOf));
+});
+
+app.get('/api/geo/reverse', async (req, res) => {
+  const lat = Number(req.query.lat), lng = Number(req.query.lng);
+  if (!validPoint({ lat, lng })) fail(400, 'Bad location');
+  const x = await nominatim(`reverse?format=jsonv2&addressdetails=1&zoom=17&lat=${lat.toFixed(5)}&lon=${lng.toFixed(5)}`);
+  res.json(x?.address ? placeOf(x) : { area: '', label: '', lat, lng });
+});
 
 // Premium shops are "featured" in every area; day-pass shops show only in their own area.
 // Shops sorted by distance from the customer (live GPS if shared, else their area's centre).
@@ -295,7 +342,7 @@ const distanceFrom = (from, shop) => from && Number.isFinite(shop.lat) ? Math.ro
 app.get('/api/market/shops', (req, res) => {
   const { area, q } = req.query;
   const live = { lat: Number(req.query.lat), lng: Number(req.query.lng) };
-  const from = validPoint(live) ? live : AREA_CENTERS[area] || null;
+  const from = validPoint(live) ? live : areaCenter(area);
   const needle = (q || '').toLowerCase();
   const shops = db.shops.filter(planActive)
     .filter((s) => !needle || s.shopName.toLowerCase().includes(needle) ||
@@ -347,7 +394,7 @@ app.post('/api/orders', customerAuth, (req, res) => {
     id: id(), idempotencyKey, shopId: shop.id, channel: 'online',
     customerId: c.id, customerName: c.name, customerPhone: c.phone, customerEmail: c.email,
     items: lines, total: lines.reduce((t, l) => t + l.price * l.qty, 0), fulfilment, address: address || null,
-    location: fulfilment === 'delivery' ? (validPoint(location) ? location : AREA_CENTERS[c.area] || { lat: shop.lat, lng: shop.lng }) : null,
+    location: fulfilment === 'delivery' ? (validPoint(location) ? location : areaCenter(c.area) || { lat: shop.lat, lng: shop.lng }) : null,
     paymentMethod, paymentStatus: 'pending', status: 'placed', timeline: [{ status: 'placed', at: now() }], at: now(),
   };
   moveStock(shop.id, lines, -1, 'order', order.id);
@@ -453,7 +500,9 @@ app.post('/api/owner/signup', (req, res) => {
   if (!shopName || !area) fail(400, 'Shop name and area are required');
   if (!/^\d{10}$/.test(phone || '')) fail(400, 'Enter a 10-digit phone number');
   if (db.shops.some((s) => s.email === g.email)) fail(409, 'This account already has a shop');
-  const pin = validPoint(location) ? location : AREA_CENTERS[area] || AREA_CENTERS.Indiranagar;
+  // Never guess a far-away pin: without a picked location we only accept an area we already know.
+  const pin = validPoint(location) ? location : areaCenter(area);
+  if (!pin) fail(400, 'Set your shop location: search for it or tap "I\'m at my shop"');
   const shop = { id: id(), ownerName: g.name, email: g.email, passwordHash: g.passwordHash, passwordSalt: g.passwordSalt, shopName, phone, area, category: category || 'kirana', lat: pin.lat, lng: pin.lng, plan: null, token: token(), at: now() };
   db.shops.push(shop);
   pendingOwners.delete(req.body.ticket);
@@ -471,6 +520,21 @@ app.post('/api/owner/demo-login', (req, res) => {
   shop.token ??= token();
   save();
   res.json({ shop: privateShop(shop), token: shop.token });
+});
+
+// Owner fixes the shop's pin or area name later.
+app.patch('/api/owner/shop', ownerAuth, (req, res) => {
+  const { location, area } = req.body;
+  if (location !== undefined) {
+    if (!validPoint(location)) fail(400, 'Pick the shop location on the map');
+    Object.assign(req.shop, { lat: Number(location.lat), lng: Number(location.lng) });
+  }
+  if (area !== undefined) {
+    if (!String(area).trim()) fail(400, 'Area name is required');
+    req.shop.area = String(area).trim().slice(0, 60);
+  }
+  log('shopkeeper', 'shop_location_updated', { shopId: req.shop.id, area: req.shop.area });
+  res.json(privateShop(req.shop));
 });
 
 app.get('/api/owner/me', ownerAuth, (req, res) => {
@@ -964,7 +1028,7 @@ const km = (a, b) => {
 
 function matchShops({ items, area, location }) {
   const wanted = (items || []).filter((i) => i?.name).slice(0, 25).map((i) => ({ name: String(i.name).slice(0, 60), qty: Math.max(1, Math.min(Number(i.qty) || 1, 20)) }));
-  const from = validPoint(location) ? location : AREA_CENTERS[area];
+  const from = validPoint(location) ? location : areaCenter(area);
   const all = db.shops.filter(planActive).map((shop) => {
     const found = [], missing = [];
     for (const w of wanted) {
