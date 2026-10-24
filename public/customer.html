@@ -39,6 +39,13 @@
 
   <!-- Shops -->
   <section id="v-shops" class="hidden">
+    <div class="card" style="border-color:var(--brand)">
+      <h3>🤖 Tell our AI what you need</h3>
+      <p class="muted">Type your list the way you'd tell the shopkeeper. We'll find the shops near you that have most of it.</p>
+      <textarea id="aText" rows="2" placeholder="2 atta, 1 litre oil, doodh, 1kg pyaz, maggi x3"></textarea>
+      <button id="aBtn" onclick="askAssistant()">Find the best shops</button>
+      <div id="aResult"></div>
+    </div>
     <div class="row" style="margin-top:8px">
       <select id="area" class="grow" onchange="loadShops()"></select>
       <input id="q" class="grow" placeholder="Search shop or item, e.g. atta" oninput="debouncedShops()">
@@ -184,11 +191,36 @@ async function loadShops() {
     </button>`).join('') || '<p class="muted">No shops open here today. Try "All areas".</p>';
 }
 
-async function openShop(id) {
+async function openShop(id, prefill) {
   const r = await api('/api/market/shops/' + id);
-  if (shop?.id !== id) cart = {};
+  if (shop?.id !== id || prefill) { cart = {}; checkoutKey = null; }
   shop = r.shop; products = r.products;
+  for (const f of prefill || []) {
+    const p = products.find((x) => x.id === f.productId);
+    if (p?.inStock) cart[p.id] = Math.min(f.qty, p.left || f.qty);
+  }
   show('shop');
+}
+
+// ---- AI shopping assistant (AgenticOrg agent, local matcher as fallback) ----
+let assistResult = null;
+async function askAssistant() {
+  const btn = $('aBtn');
+  btn.disabled = true; btn.textContent = 'Finding shops…';
+  try {
+    assistResult = await call('/api/assistant/shop', { body: { text: $('aText').value.trim(), location: myLocation } });
+    const r = assistResult;
+    $('aResult').innerHTML = `
+      <p style="margin-top:12px"><span class="badge ${r.source === 'agenticorg' ? 'paid' : 'pending'}">${r.source === 'agenticorg' ? 'AgenticOrg agent' : 'Local matcher (AgenticOrg offline)'}</span></p>
+      <p>${esc(r.summary)}</p>
+      ${r.shops.map((s, i) => `<div class="card" style="margin:8px 0">
+        <div class="row"><strong class="grow">${i === 0 ? '🏆 ' : ''}${esc(s.shopName)}</strong>${s.premium ? '<span class="badge premium">★</span>' : ''}
+          <span class="badge">${s.found.length}/${r.wanted.length} items</span></div>
+        <div class="muted">${esc(s.area)}${s.distanceKm != null ? ` · ${s.distanceKm} km` : ''} · about ${rupees(s.total)} · ${s.delivery ? 'delivery or pickup' : 'pickup'}</div>
+        <div style="margin:6px 0">${s.found.map((f) => `✓ ${esc(f.name)} ×${f.qty}`).join('<br>')}${s.missing.length ? `<br><span class="muted">✗ Not here: ${s.missing.map(esc).join(', ')}</span>` : ''}</div>
+        <button class="small" onclick="openShop('${s.shopId}', assistResult.shops[${i}].found)">Order these from ${esc(s.shopName)} →</button>
+      </div>`).join('')}`;
+  } finally { btn.disabled = false; btn.textContent = 'Find the best shops'; }
 }
 
 function renderProducts() {

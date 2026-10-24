@@ -29,6 +29,7 @@ if (!db.products) {
   const fresh = seed({ id, endOfDayIST, istMidnight });
   for (const k of Object.keys(fresh)) db[k] = [...(db[k] || []), ...fresh[k]];
 }
+for (const k of ['assists', 'stockAdvice']) db[k] ??= [];
 const save = () => fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2));
 save();
 
@@ -208,7 +209,7 @@ app.use(express.static('public'));
 const baseUrl = (req) => process.env.PUBLIC_URL?.replace(/\/$/, '') || `${req.protocol}://${req.get('host')}`;
 
 app.get('/api/config', (req, res) => res.json({
-  paymentsLive: pinelabs.isConfigured(), agentConnected: agenticorg.isConfigured(), emailOn: mailer.isConfigured(),
+  paymentsLive: pinelabs.isConfigured(), emailOn: mailer.isConfigured(),
   googleClientId: process.env.GOOGLE_CLIENT_ID || null, plans: PLANS, areas: AREA_CENTERS,
 }));
 
@@ -686,12 +687,12 @@ app.post('/api/owner/khata/entries', ownerAuth, (req, res) => {
 // Shopkeeper asks the AgenticOrg agent to check dues now; it drafts via our /mcp tools.
 app.post('/api/owner/run-agent', ownerAuth, async (req, res) => {
   const shop = req.shop;
-  if (!agenticorg.isConfigured()) fail(503, 'AgenticOrg agent not connected yet');
+  if (!agenticorg.isConfigured('khata')) fail(503, 'AgenticOrg agent not connected yet');
   log('shopkeeper', 'asked_agent', { shopId: shop.id });
   try {
-    const run = await agenticorg.runAgent({ shopId: shop.id, shopName: shop.shopName, task: 'Check dues for this shop and draft reminders' });
-    log('agent', 'agenticorg_run', { shopId: shop.id, runId: run.runId, status: run.status });
-    res.json(run);
+    const run = await agenticorg.runAgent('khata', { shopId: shop.id, shopName: shop.shopName, task: `Check dues for shop ${shop.id} (${shop.shopName}) and draft reminders` });
+    log('agent', 'agenticorg_run', { agent: 'khata', shopId: shop.id, runId: run.runId, status: run.status });
+    res.json({ status: run.status, summary: agenticorg.outputText(run.output) });
   } catch (err) {
     log('agent', 'agenticorg_run_failed', { shopId: shop.id, error: err.message });
     fail(502, err.message);
@@ -734,7 +735,237 @@ app.post('/api/owner/reminders/:id/mark-paid', ownerAuth, (req, res) => {
   res.json(r);
 });
 
-// ---- Agent tools (used by the AgenticOrg agent over MCP, or REST with x-api-key) ----
+
+// ---- AI agent 1: Shopping assistant ----
+// A customer's free-text list ("2 atta, 1L oil, doodh") -> the nearby shops that can fill most of it.
+// The AgenticOrg agent parses the list and calls find_shops_for_list over MCP; if AgenticOrg is
+// unreachable we run the same matcher on a simple local parse, and say so in the UI.
+const SYNONYMS = {
+  doodh: 'milk', dudh: 'milk', chawal: 'basmati', rice: 'basmati', aloo: 'potato', pyaz: 'onion', pyaaz: 'onion', kanda: 'onion',
+  tamatar: 'tomato', cheeni: 'sugar', chini: 'sugar', namak: 'salt', chai: 'tea', biscuit: 'parle', biscuits: 'parle',
+  noodles: 'maggi', detergent: 'surf', makhan: 'butter', kela: 'banana', seb: 'apple', dhaniya: 'coriander', mirchi: 'chilli',
+  tel: 'oil', paracetamol: 'dolo', fever: 'dolo', sanitizer: 'sanitiser', bandage: 'band-aid',
+};
+const tokens = (str) => String(str).toLowerCase().replace(/[^a-z0-9\s-]/g, ' ').split(/\s+/).filter(Boolean)
+  .map((t) => SYNONYMS[t] || t.replace(/(?<=[a-z]{3})s$/, ''));
+
+function parseList(text) {
+  return String(text || '').split(/,|\n|;|\band\b|&|\+/i).map((part) => part.trim()).filter(Boolean).slice(0, 25).map((part) => {
+    // "2 atta", "atta x2", "3 packets maggi"; sizes like "1kg"/"500 ml" are not quantities.
+    const m = part.match(/^(\d{1,2})\s*(?:x|nos?|pcs?|packets?|packs?)?\s+(?!kg|g|gm|l|ml|ltr|litre|liter)\b(.+)$/i) || part.match(/^(.+?)\s*(?:x|×)\s*(\d{1,2})$/i);
+    const qty = m ? Number(/^\d/.test(m[1]) ? m[1] : m[2]) : 1;
+    const name = (m ? (/^\d/.test(m[1]) ? m[2] : m[1]) : part).replace(/\b\d+(\.\d+)?\s*(kg|g|gm|l|ml|ltr|litre|liter)s?\b/gi, '').trim() || part;
+    return { name, qty: Math.max(1, Math.min(qty, 20)) };
+  });
+}
+
+function bestProduct(shopId, wanted) {
+  const want = tokens(wanted).filter((t) => !/^\d/.test(t));
+  if (!want.length) return null;
+  let best = null;
+  for (const p of db.products.filter((x) => x.shopId === shopId && x.stock > 0)) {
+    const have = tokens(p.name + ' ' + p.category);
+    const score = want.filter((w) => have.some((h) => h === w || (w.length >= 4 && h.startsWith(w)))).length / want.length;
+    if (score >= 0.5 && (!best || score > best.score || (score === best.score && p.price < best.p.price))) best = { p, score };
+  }
+  return best?.p;
+}
+
+const km = (a, b) => {
+  const R = 6371, rad = Math.PI / 180;
+  const dLat = (b.lat - a.lat) * rad, dLng = (b.lng - a.lng) * rad;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * rad) * Math.cos(b.lat * rad) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+};
+
+function matchShops({ items, area, location }) {
+  const wanted = (items || []).filter((i) => i?.name).slice(0, 25).map((i) => ({ name: String(i.name).slice(0, 60), qty: Math.max(1, Math.min(Number(i.qty) || 1, 20)) }));
+  const from = validPoint(location) ? location : AREA_CENTERS[area];
+  const rank = (inArea) => db.shops.filter(planActive).filter((s) => !inArea || s.area === inArea || isPremium(s)).map((shop) => {
+    const found = [], missing = [];
+    for (const w of wanted) {
+      const p = bestProduct(shop.id, w.name);
+      if (p) found.push({ wanted: w.name, productId: p.id, name: p.name, price: p.price, qty: Math.min(w.qty, p.stock) });
+      else missing.push(w.name);
+    }
+    return {
+      shopId: shop.id, shopName: shop.shopName, area: shop.area, premium: isPremium(shop), delivery: isPremium(shop),
+      found, missing, coverage: wanted.length ? found.length / wanted.length : 0,
+      total: found.reduce((t, f) => t + f.price * f.qty, 0),
+      distanceKm: from && Number.isFinite(shop.lat) ? Math.round(km(from, shop) * 10) / 10 : null,
+    };
+  }).filter((s) => s.found.length)
+    .sort((a, b) => b.coverage - a.coverage || (a.distanceKm ?? 99) - (b.distanceKm ?? 99) || a.total - b.total)
+    .slice(0, 3);
+  // Nothing in the customer's area? Look across all areas rather than come back empty.
+  let shops = rank(area), widened = false;
+  if (!shops.length && area) { shops = rank(null); widened = shops.length > 0; }
+  const nowhere = wanted.filter((w) => !shops.some((s) => s.found.some((f) => f.wanted === w.name))).map((w) => w.name);
+  return { wanted, shops, nowhere, widened };
+}
+
+function localSummary(r) {
+  if (!r.shops.length) return `Sorry, no open shop nearby has these items right now.`;
+  const top = r.shops[0];
+  return `${r.widened ? 'Nothing in your area, but ' : ''}${top.shopName} has ${top.found.length} of your ${r.wanted.length} items for about ₹${top.total}${top.distanceKm != null ? `, ${top.distanceKm} km away` : ''}.` +
+    (top.missing.length ? ` Not there: ${top.missing.join(', ')}.` : ' Everything is in stock!') +
+    (r.nowhere.length ? ` Nobody nearby has ${r.nowhere.join(', ')} right now.` : '');
+}
+
+app.post('/api/assistant/shop', customerAuth, async (req, res) => {
+  const text = String(req.body.text || '').trim().slice(0, 500);
+  if (!text) fail(400, 'Tell us what you need, e.g. 2 atta, 1 oil, milk');
+  const c = req.customer;
+  const location = validPoint(req.body.location) ? req.body.location : null;
+  const a = { id: id(), customerId: c.id, text, area: c.area, location, at: now() };
+  db.assists.push(a);
+
+  if (agenticorg.isConfigured('shopper')) {
+    try {
+      const run = await agenticorg.runAgent('shopper', {
+        task: `Customer shopping list: "${text}". Find the best nearby shops.`, requestId: a.id, area: c.area, lat: location?.lat, lng: location?.lng,
+      });
+      a.agentStatus = run.status;
+      a.summary = agenticorg.outputText(run.output);
+      log('agent', 'agenticorg_run', { agent: 'shopper', requestId: a.id, runId: run.runId, status: run.status });
+    } catch (err) {
+      log('agent', 'agenticorg_run_failed', { agent: 'shopper', requestId: a.id, error: err.message });
+    }
+  }
+  // The agent stores its matches through the MCP tool; without them, fall back to the local matcher.
+  if (!a.result) {
+    a.result = matchShops({ items: parseList(text), area: c.area, location });
+    a.source = 'local';
+  } else {
+    a.source = 'agenticorg';
+  }
+  a.summary ||= localSummary(a.result);
+  log('customer', 'assistant_query', { requestId: a.id, items: a.result.wanted.length, source: a.source, missed: a.result.nowhere });
+  res.json({ source: a.source, agentStatus: a.agentStatus, summary: a.summary, ...a.result });
+});
+
+// ---- AI agent 2: Demand advisor (Premium) ----
+// Reads area-level order trends (never another shop's customers) plus what shoppers asked the
+// assistant for and couldn't find, and suggests what this shop should stock more of.
+function areaDemand(area, days = 14) {
+  const t = Date.now();
+  const inArea = new Set(db.shops.filter((s) => !area || s.area === area).map((s) => s.id));
+  const orders = db.orders.filter((o) => inArea.has(o.shopId) && o.status !== 'cancelled');
+  const tally = (from, to) => {
+    const m = {};
+    for (const o of orders.filter((o) => t - Date.parse(o.at) >= from * DAY && t - Date.parse(o.at) < to * DAY)) {
+      for (const l of o.items) {
+        const p = db.products.find((x) => x.id === l.productId);
+        m[l.name] ??= { product: l.name, category: p?.category || 'Other', qty: 0, orders: 0, shops: new Set() };
+        m[l.name].qty += l.qty; m[l.name].orders++; m[l.name].shops.add(o.shopId);
+      }
+    }
+    return m;
+  };
+  const cur = tally(0, days), prev = tally(days, days * 2);
+  const products = Object.values(cur).map((x) => ({
+    product: x.product, category: x.category, qty: x.qty, orders: x.orders, shopsSelling: x.shops.size,
+    growthPct: prev[x.product]?.qty ? Math.round(((x.qty - prev[x.product].qty) / prev[x.product].qty) * 100) : null,
+  })).sort((a, b) => b.qty - a.qty);
+  const categories = {};
+  for (const p of products) categories[p.category] = (categories[p.category] || 0) + p.qty;
+  const missed = {};
+  for (const a of db.assists.filter((a) => (!area || a.area === area) && t - Date.parse(a.at) < days * DAY && a.result)) {
+    for (const n of a.result.nowhere) missed[n.toLowerCase()] = (missed[n.toLowerCase()] || 0) + 1;
+  }
+  return {
+    area: area || 'all areas', days,
+    topProducts: products.slice(0, 12),
+    rising: products.filter((p) => p.growthPct !== null && p.growthPct >= 20 && p.qty >= 3).sort((a, b) => b.growthPct - a.growthPct).slice(0, 6),
+    categories: Object.entries(categories).map(([category, qty]) => ({ category, qty })).sort((a, b) => b.qty - a.qty),
+    missedSearches: Object.entries(missed).map(([item, searches]) => ({ item, searches })).sort((a, b) => b.searches - a.searches).slice(0, 8),
+  };
+}
+
+const shopInventory = (shopId) => db.products.filter((p) => p.shopId === shopId)
+  .map(({ id, name, category, stock, lowStockAt, price }) => ({ productId: id, name, category, stock, lowStockAt, price }));
+
+function saveStockSuggestions({ shopId, summary, suggestions, source }) {
+  const shop = db.shops.find((s) => s.id === shopId);
+  if (!shop) throw new Error('Unknown shopId');
+  const clean = (suggestions || []).slice(0, 10).map((sg) => {
+    const p = sg.productId ? db.products.find((x) => x.id === sg.productId && x.shopId === shopId) : bestProduct(shopId, sg.product || '') || db.products.find((x) => x.shopId === shopId && x.name.toLowerCase() === String(sg.product).toLowerCase());
+    return {
+      product: String(sg.product || p?.name || '').slice(0, 80), productId: p?.id || null,
+      action: p ? (['stock_more', 'promote'].includes(sg.action) ? sg.action : 'stock_more') : 'add_new',
+      suggestedQty: Math.max(0, Math.min(Number(sg.suggestedQty) || 0, 500)), reason: String(sg.reason || '').slice(0, 240), status: 'pending',
+    };
+  }).filter((sg) => sg.product);
+  const advice = { id: id(), shopId, summary: String(summary || '').slice(0, 600), suggestions: clean, source: source || 'agenticorg', at: now() };
+  db.stockAdvice.push(advice);
+  log('agent', 'stock_advice_saved', { adviceId: advice.id, shopId, suggestions: clean.length, source: advice.source });
+  return advice;
+}
+
+function localStockAdvice(shop) {
+  const d = areaDemand(shop.area, 14);
+  const inv = shopInventory(shop.id);
+  const sug = [];
+  for (const tp of d.topProducts.slice(0, 8)) {
+    const mine = inv.find((p) => p.name === tp.product);
+    const weekly = Math.ceil(tp.qty / 2 / Math.max(1, tp.shopsSelling));
+    if (mine && mine.stock < Math.max(weekly, mine.lowStockAt * 2)) {
+      sug.push({ productId: mine.productId, product: mine.name, action: 'stock_more', suggestedQty: Math.max(weekly * 2 - mine.stock, 5), reason: `${tp.qty} sold in ${d.area} in 14 days${tp.growthPct ? ` (${tp.growthPct > 0 ? '+' : ''}${tp.growthPct}%)` : ''}; you have ${mine.stock}.` });
+    } else if (!mine && tp.qty >= 5) {
+      sug.push({ product: tp.product, action: 'add_new', suggestedQty: weekly * 2, reason: `Popular in ${d.area} (${tp.qty} sold in 14 days) and you don't stock it.` });
+    }
+  }
+  for (const m of d.missedSearches.slice(0, 3)) {
+    if (!sug.some((s) => s.product.toLowerCase().includes(m.item))) sug.push({ product: m.item, action: 'add_new', suggestedQty: 10, reason: `${m.searches} shopper${m.searches > 1 ? 's' : ''} in ${d.area} searched for this and no shop had it.` });
+  }
+  const top = d.categories[0];
+  return saveStockSuggestions({
+    shopId: shop.id, source: 'local', suggestions: sug.slice(0, 6),
+    summary: top ? `In ${d.area}, ${top.category} leads demand this fortnight.${d.rising[0] ? ` ${d.rising[0].product} is rising fastest (+${d.rising[0].growthPct}%).` : ''}` : `Not enough orders in ${d.area} yet.`,
+  });
+}
+
+app.post('/api/owner/stock-advice', ownerAuth, async (req, res) => {
+  const shop = req.shop;
+  if (!isPremium(shop)) fail(402, 'The AI stock advisor is part of Premium');
+  const before = db.stockAdvice.length;
+  let agentStatus;
+  if (agenticorg.isConfigured('demand')) {
+    try {
+      const run = await agenticorg.runAgent('demand', { task: `Suggest what shop ${shop.id} (${shop.shopName}, ${shop.area}) should stock more of.`, shopId: shop.id, area: shop.area });
+      agentStatus = run.status;
+      log('agent', 'agenticorg_run', { agent: 'demand', shopId: shop.id, runId: run.runId, status: run.status });
+    } catch (err) {
+      log('agent', 'agenticorg_run_failed', { agent: 'demand', shopId: shop.id, error: err.message });
+    }
+  }
+  const fresh = db.stockAdvice.slice(before).find((a) => a.shopId === shop.id);
+  res.json({ ...(fresh || localStockAdvice(shop)), agentStatus });
+});
+
+app.get('/api/owner/stock-advice', ownerAuth, (req, res) => {
+  res.json(db.stockAdvice.filter((a) => a.shopId === req.shop.id).at(-1) || null);
+});
+
+// Human-in-the-loop: the owner accepts (restocks) or dismisses each suggestion.
+app.post('/api/owner/stock-advice/:id/:index', ownerAuth, (req, res) => {
+  const advice = db.stockAdvice.find((a) => a.id === req.params.id && a.shopId === req.shop.id);
+  const sg = advice?.suggestions[Number(req.params.index)];
+  if (!sg) fail(404, 'Suggestion not found');
+  const { action, qty } = req.body;
+  if (!['accept', 'dismiss'].includes(action)) fail(400, 'accept or dismiss');
+  if (sg.status !== 'pending') return res.json(sg); // already handled: don't restock twice
+  if (action === 'accept' && sg.productId) {
+    const n = Number(qty ?? sg.suggestedQty);
+    if (!Number.isInteger(n) || n < 1 || n > 10000) fail(400, 'Enter how many to add');
+    moveStock(req.shop.id, [{ productId: sg.productId, qty: n }], +1, 'restock', `advice-${advice.id}-${req.params.index}`);
+  }
+  sg.status = action === 'accept' ? 'accepted' : 'dismissed';
+  log('shopkeeper', `stock_advice_${sg.status}`, { adviceId: advice.id, product: sg.product });
+  res.json(sg);
+});
+
+// ---- Agent tools (used by the AgenticOrg agents over MCP, or REST with x-api-key) ----
 function getDues(shopId) {
   const result = db.shops.filter((s) => !shopId || s.id === shopId).map((shop) => ({
     shopId: shop.id,
@@ -780,7 +1011,7 @@ app.post('/api/agent/reminders', agentAuth, (req, res) => {
 
 // Remote MCP (Streamable HTTP, stateless) — register in AgenticOrg under Connectors > Remote MCP.
 function buildMcpServer() {
-  const server = new McpServer({ name: 'khata-agent', version: '1.2.0' });
+  const server = new McpServer({ name: 'khata-agent', version: '1.3.0' });
   const asText = (data) => ({ content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] });
   server.registerTool('get_dues', {
     description: 'List kirana shops with customers who owe money on khata (udhaar): shopId, shop/owner name, customer name, phone and balance in rupees. Pass shopId to check one shop.',
@@ -801,6 +1032,45 @@ function buildMcpServer() {
     },
   }, async (args) => {
     try { return asText(draftReminder(args)); } catch (err) { return { ...asText({ error: err.message }), isError: true }; }
+  });
+  server.registerTool('find_shops_for_list', {
+    description: 'Shopping assistant: given a customer\'s shopping list (already split into items), return up to 3 nearby open shops ranked by how many items they have in stock, then distance, then price. Pass the requestId you were given so the app can show the result to the customer.',
+    inputSchema: {
+      requestId: z.string().optional().describe('requestId from the task inputs'),
+      area: z.string().optional().describe('Customer area, e.g. Indiranagar'),
+      lat: z.number().optional(), lng: z.number().optional(),
+      items: z.array(z.object({ name: z.string().describe('Item in plain English, e.g. "atta", "milk", "sunflower oil"'), qty: z.number().optional() })).describe('Items to find'),
+    },
+    annotations: { readOnlyHint: true },
+  }, async ({ requestId, area, lat, lng, items }) => {
+    const a = requestId && db.assists.find((x) => x.id === requestId);
+    const result = matchShops({ items, area: area || a?.area, location: validPoint({ lat, lng }) ? { lat, lng } : a?.location });
+    if (a) { a.result = result; save(); }
+    log('agent', 'find_shops_for_list', { requestId, items: result.wanted.length, shops: result.shops.length });
+    return asText(result);
+  });
+  server.registerTool('get_area_demand', {
+    description: 'Demand advisor: area-level demand for the last N days: top products by quantity, rising products (growth vs the previous period), category totals, and items shoppers searched for that no shop had. Aggregates only; no customer data.',
+    inputSchema: { area: z.string().describe('Area name, e.g. Indiranagar'), days: z.number().optional().describe('Window in days (default 14)') },
+    annotations: { readOnlyHint: true },
+  }, async ({ area, days }) => asText(areaDemand(area, Math.max(1, Math.min(Number(days) || 14, 60)))));
+  server.registerTool('get_shop_inventory', {
+    description: 'Demand advisor: one shop\'s products with current stock, low-stock level and price.',
+    inputSchema: { shopId: z.string() },
+    annotations: { readOnlyHint: true },
+  }, async ({ shopId }) => asText(shopInventory(shopId)));
+  server.registerTool('save_stock_suggestions', {
+    description: 'Demand advisor: save stock suggestions for a shop. They are only shown to the shop owner, who accepts or dismisses each one; nothing is ordered automatically.',
+    inputSchema: {
+      shopId: z.string(),
+      summary: z.string().describe('2-3 sentence plain-language summary for the shop owner'),
+      suggestions: z.array(z.object({
+        product: z.string(), productId: z.string().optional().describe('productId from get_shop_inventory if the shop already sells it'),
+        action: z.enum(['stock_more', 'add_new', 'promote']), suggestedQty: z.number().optional(), reason: z.string(),
+      })).max(10),
+    },
+  }, async (args) => {
+    try { return asText(saveStockSuggestions(args)); } catch (err) { return { ...asText({ error: err.message }), isError: true }; }
   });
   return server;
 }

@@ -415,14 +415,20 @@ async function loadInsights() {
   try { d = await call('/api/owner/insights'); } catch (err) {
     if (err.status !== 402) return;
     $('insights').innerHTML = `<div class="card plan best" style="margin-top:12px"><h2>🔒 Insights are part of Premium</h2>
-      <p class="muted">See which products sell most, your sales over the last two weeks, your repeat customers, how many people viewed your shop, and what to restock first.</p>
+      <p class="muted">Get the AI stock advisor, which reads what's selling across your area and what shoppers can't find, and tells you what to stock. You also see your top sellers, sales trend, when customers order, repeat customers and shop views.</p>
       <button onclick="setTab('plan')">See Premium</button></div>`;
     return;
   }
+  const advice = await call('/api/owner/stock-advice');
   const maxDay = Math.max(1, ...d.salesByDay.map((x) => x.revenue));
   const maxQty = Math.max(1, ...d.topProducts.map((x) => x.qty));
   $('insights').innerHTML = `
-    <div class="grid" style="margin-top:12px">
+    <div class="card" style="margin-top:12px;border-color:var(--brand)">
+      <div class="row"><h3 class="grow" style="margin:0">🤖 AI stock advisor</h3><button class="small" id="adviseBtn" onclick="getAdvice()">${advice ? 'Refresh advice' : 'Get advice'}</button></div>
+      <p class="muted">Reads what's selling across ${esc(me.area)} (area totals only) and what shoppers searched for but couldn't find. You decide on every suggestion.</p>
+      <div id="advisor"></div>
+    </div>
+    <div class="grid">
       <div class="card"><div class="muted">Sales today</div><div class="stat">${rupees(d.revenue.today)}</div></div>
       <div class="card"><div class="muted">Last 7 days</div><div class="stat">${rupees(d.revenue.d7)}</div></div>
       <div class="card"><div class="muted">Last 30 days</div><div class="stat">${rupees(d.revenue.d30)}</div><div class="muted">${d.orders30} orders · ${d.channels.online} online / ${d.channels.walkIn} counter</div></div>
@@ -442,6 +448,46 @@ async function loadInsights() {
       <div class="card"><h3>Best customers</h3><p class="muted">${d.repeatCustomers} customers came back more than once this month.</p>
         <table><tbody>${d.topCustomers.map((c) => `<tr><td>${esc(c.name)}</td><td class="num">${c.orders} orders</td><td class="num">${rupees(c.spend)}</td></tr>`).join('')}</tbody></table></div>
     </div>`;
+  renderAdvice(advice);
+}
+
+// ---- AI stock advisor (AgenticOrg demand agent, local fallback) ----
+let advice = null;
+const ADVICE_LABEL = { stock_more: 'Stock more', add_new: 'Add new item', promote: 'Promote' };
+function renderAdvice(a) {
+  advice = a;
+  if (!a) { $('advisor').innerHTML = ''; return; }
+  $('advisor').innerHTML = `
+    <p><span class="badge ${a.source === 'agenticorg' ? 'paid' : 'pending'}">${a.source === 'agenticorg' ? 'AgenticOrg agent' : 'Local advisor (AgenticOrg offline)'}</span> <span class="muted">${when(a.at)}</span></p>
+    <p>${esc(a.summary)}</p>
+    ${a.suggestions.map((s, i) => `<div class="product">
+      <div class="grow"><span class="badge">${ADVICE_LABEL[s.action]}</span> <strong>${esc(s.product)}</strong>${s.suggestedQty ? ` · +${s.suggestedQty}` : ''}<div class="muted">${esc(s.reason)}</div></div>
+      ${s.status !== 'pending' ? `<span class="badge ${s.status === 'accepted' ? 'paid' : 'cancelled'}">${s.status}</span>` : `<div class="row" style="flex-wrap:nowrap">
+        ${s.productId ? `<input id="adv-${i}" type="number" min="1" value="${s.suggestedQty || 10}" style="width:70px"><button class="small" onclick="adviceAction(${i},'accept')">Restock</button>`
+          : `<button class="small" onclick="adviceAddNew(${i})">Add to inventory</button>`}
+        <button class="small secondary" onclick="adviceAction(${i},'dismiss')">✕</button></div>`}
+    </div>`).join('') || '<p class="muted">Nothing to change right now. Your shelves match local demand.</p>'}`;
+}
+async function getAdvice() {
+  const btn = $('adviseBtn');
+  btn.disabled = true; btn.textContent = 'Analysing your area…';
+  try { renderAdvice(await call('/api/owner/stock-advice', { body: {} })); } finally { btn.disabled = false; btn.textContent = 'Refresh advice'; }
+}
+async function adviceAction(i, action) {
+  const body = { action };
+  if (action === 'accept') body.qty = Number($('adv-' + i).value);
+  const sg = await call(`/api/owner/stock-advice/${advice.id}/${i}`, { body });
+  advice.suggestions[i] = sg;
+  if (action === 'accept') { toast(`Restocked ${sg.product}`); refreshMe(); }
+  renderAdvice(advice);
+}
+async function adviceAddNew(i) {
+  const s = advice.suggestions[i];
+  await call(`/api/owner/stock-advice/${advice.id}/${i}`, { body: { action: 'accept' } });
+  setTab('inventory');
+  document.querySelector('#t-inventory details').open = true;
+  $('npName').value = s.product; $('npStock').value = s.suggestedQty || 10; $('npPrice').focus();
+  toast('Fill in the price and add it');
 }
 
 // ---- plans ----
