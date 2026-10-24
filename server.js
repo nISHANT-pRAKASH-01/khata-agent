@@ -8,7 +8,7 @@ import { z } from 'zod';
 import * as pinelabs from './pinelabs.js';
 import * as agenticorg from './agenticorg.js';
 import * as mailer from './mailer.js';
-import { seed, AREA_CENTERS } from './seed.js';
+import { seed, seedHabits, AREA_CENTERS } from './seed.js';
 
 const DAY = 86400000;
 const IST = 5.5 * 3600000;
@@ -25,11 +25,16 @@ const endOfDayIST = (d) => new Date(istMidnight(d) + DAY - 1);
 const DATA_FILE = process.env.DATA_FILE || 'data.json';
 const db = fs.existsSync(DATA_FILE) ? JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')) : seed({ id, endOfDayIST, istMidnight });
 // Older data files (khata-only) predate the marketplace: add the mock marketplace alongside.
+// Data files from before the inventory coach: give the demo shops their stock-keeping history.
+if (db.products && !db.purchases) {
+  db.purchases = []; db.stockCounts = [];
+  seedHabits(db, { id });
+}
 if (!db.products) {
   const fresh = seed({ id, endOfDayIST, istMidnight });
   for (const k of Object.keys(fresh)) db[k] = [...(db[k] || []), ...fresh[k]];
 }
-for (const k of ['assists', 'stockAdvice']) db[k] ??= [];
+for (const k of ['assists', 'stockAdvice', 'purchases', 'stockCounts', 'coachTips']) db[k] ??= [];
 const save = () => fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2));
 save();
 
@@ -723,6 +728,217 @@ app.get('/api/owner/insights', ownerAuth, (req, res) => {
   });
 });
 
+// ---- Inventory: wholesale stock-in and stock counts ----
+// A wholesale delivery is entered as a purchase bill; stock goes up once per purchase (idempotency key).
+app.post('/api/owner/purchases', ownerAuth, (req, res) => {
+  const { supplier, invoiceNo, lines, idempotencyKey } = req.body;
+  if (!validKey(idempotencyKey)) fail(400, 'Missing idempotency key');
+  const existing = db.purchases.find((x) => x.shopId === req.shop.id && x.idempotencyKey === idempotencyKey);
+  if (existing) return res.json({ ...existing, duplicate: true });
+  if (!supplier?.trim()) fail(400, 'Who did you buy from? Enter the supplier name');
+  if (!Array.isArray(lines) || !lines.length) fail(400, 'Add at least one item');
+  const priced = lines.map((l) => {
+    const p = db.products.find((x) => x.id === l.productId && x.shopId === req.shop.id);
+    const qty = Number(l.qty), cost = Number(l.cost);
+    if (!p) fail(400, 'Item not found. Add new items under "Add a product" first');
+    if (!Number.isInteger(qty) || qty < 1 || qty > 10000) fail(400, `Quantity for ${p.name} must be a whole number`);
+    if (!(cost > 0) || cost > 100000) fail(400, `Enter the cost price for ${p.name}`);
+    return { productId: p.id, name: p.name, qty, cost };
+  });
+  const purchase = {
+    id: id(), idempotencyKey, shopId: req.shop.id, supplier: supplier.trim().slice(0, 80), invoiceNo: String(invoiceNo || '').trim().slice(0, 40),
+    lines: priced, total: priced.reduce((t, l) => t + l.qty * l.cost, 0), at: now(),
+  };
+  db.purchases.push(purchase);
+  moveStock(req.shop.id, priced, +1, 'purchase', purchase.id);
+  for (const l of priced) db.products.find((p) => p.id === l.productId).cost = l.cost;
+  log('shopkeeper', 'wholesale_purchase', { purchaseId: purchase.id, supplier: purchase.supplier, items: priced.length, total: purchase.total });
+  res.json(purchase);
+});
+
+app.get('/api/owner/purchases', ownerAuth, (req, res) => {
+  res.json(db.purchases.filter((x) => x.shopId === req.shop.id).sort((a, b) => b.at.localeCompare(a.at)).slice(0, 20)
+    .map(({ idempotencyKey, ...x }) => x));
+});
+
+// Physical count: the shelf is the truth. Any shortfall was most likely sold without a bill.
+app.post('/api/owner/stock-count', ownerAuth, (req, res) => {
+  const { counts, idempotencyKey } = req.body;
+  if (!validKey(idempotencyKey)) fail(400, 'Missing idempotency key');
+  const existing = db.stockCounts.find((x) => x.shopId === req.shop.id && x.idempotencyKey === idempotencyKey);
+  if (existing) return res.json({ ...existing, duplicate: true });
+  if (!Array.isArray(counts) || !counts.length) fail(400, 'Count at least one item');
+  const lines = counts.map((c) => {
+    const p = db.products.find((x) => x.id === c.productId && x.shopId === req.shop.id);
+    const counted = Number(c.counted);
+    if (!p) fail(400, 'Item not found');
+    if (!Number.isInteger(counted) || counted < 0 || counted > 100000) fail(400, `Enter a whole number for ${p.name}`);
+    return { productId: p.id, name: p.name, expected: p.stock, counted, diff: counted - p.stock };
+  });
+  const count = { id: id(), idempotencyKey, shopId: req.shop.id, lines, at: now() };
+  db.stockCounts.push(count);
+  moveStock(req.shop.id, lines.filter((l) => l.diff).map((l) => ({ productId: l.productId, qty: l.diff })), +1, 'count_adjust', count.id);
+  log('shopkeeper', 'stock_count', { countId: count.id, items: lines.length, missing: -lines.filter((l) => l.diff < 0).reduce((t, l) => t + l.diff, 0), extra: lines.filter((l) => l.diff > 0).reduce((t, l) => t + l.diff, 0) });
+  const { idempotencyKey: _, ...out } = count;
+  res.json(out);
+});
+
+// ---- AI agent 3: Inventory coach ----
+// Measures the shop's stock-keeping habits and teaches the owner to keep the system in sync with the shelf.
+function inventoryHabits(shopId) {
+  const t = Date.now();
+  const recent = (x, days = 30) => t - Date.parse(x.at) < days * DAY;
+  const moves = db.stockMoves.filter((m) => m.shopId === shopId && recent(m));
+  const units = (reason, sign = 1) => moves.filter((m) => m.reason === reason && Math.sign(m.delta) === sign).reduce((n, m) => n + Math.abs(m.delta), 0);
+  const billedUnits = db.orders.filter((o) => o.shopId === shopId && o.status !== 'cancelled' && recent(o))
+    .reduce((n, o) => n + o.items.reduce((k, l) => k + l.qty, 0), 0);
+  const unbilledUnits = units('count_adjust', -1);
+  const purchaseUnits = units('purchase'), quickAddUnits = units('restock');
+  const purchases = db.purchases.filter((x) => x.shopId === shopId).sort((a, b) => b.at.localeCompare(a.at));
+  const counts = db.stockCounts.filter((x) => x.shopId === shopId).sort((a, b) => b.at.localeCompare(a.at));
+  const lastCount = counts[0];
+  const daysAgo = (x) => x ? Math.floor((t - Date.parse(x.at)) / DAY) : null;
+  const billDays = new Set(db.orders.filter((o) => o.shopId === shopId && recent(o, 7)).map((o) => istDay(o.at))).size;
+  const products = db.products.filter((p) => p.shopId === shopId);
+  const sold = {};
+  for (const o of db.orders.filter((o) => o.shopId === shopId && o.status !== 'cancelled' && recent(o))) for (const l of o.items) sold[l.productId] = (sold[l.productId] || 0) + l.qty;
+  const topSellers = products.filter((p) => sold[p.id]).sort((a, b) => sold[b.id] - sold[a.id]).slice(0, 8);
+  const topOut = topSellers.filter((p) => p.stock === 0).map((p) => p.name);
+  const topLow = topSellers.filter((p) => p.stock > 0 && p.stock <= p.lowStockAt).map((p) => p.name);
+  const missingItems = lastCount ? lastCount.lines.filter((l) => l.diff < 0).sort((a, b) => a.diff - b.diff).slice(0, 5).map((l) => ({ name: l.name, missing: -l.diff })) : [];
+  const noCost = products.filter((p) => !p.cost).length;
+
+  const billingRate = billedUnits + unbilledUnits ? billedUnits / (billedUnits + unbilledUnits) : 1;
+  const entryRate = purchaseUnits + quickAddUnits ? purchaseUnits / (purchaseUnits + quickAddUnits) : 0;
+  const countAge = daysAgo(lastCount);
+  const countScore = countAge === null ? 0 : countAge <= 7 ? 1 : countAge <= 14 ? 0.5 : 0.2;
+  const shelfScore = topSellers.length ? 1 - (topOut.length + topLow.length * 0.5) / topSellers.length : 1;
+  const parts = {
+    billing: { score: Math.round(billingRate * 40), max: 40, label: 'Every sale billed', detail: `${billedUnits} units billed, ${unbilledUnits} found missing at counts (30 days)` },
+    wholesale: { score: Math.round(entryRate * 25), max: 25, label: 'Wholesale deliveries entered', detail: `${purchaseUnits} units entered from wholesale bills, ${quickAddUnits} added with quick "+ Add"` },
+    counting: { score: Math.round(countScore * 20), max: 20, label: 'Weekly stock count', detail: countAge === null ? 'Never counted' : `Last count ${countAge === 0 ? 'today' : countAge + ' days ago'}` },
+    shelf: { score: Math.round(Math.max(0, shelfScore) * 15), max: 15, label: 'Top sellers on the shelf', detail: topOut.length || topLow.length ? `${[...topOut.map((n) => n + ' (out)'), ...topLow.map((n) => n + ' (low)')].join(', ')}` : 'All top sellers in stock' },
+  };
+  return {
+    score: Object.values(parts).reduce((n, p) => n + p.score, 0), parts,
+    billedUnits, unbilledUnits, billingRatePct: Math.round(billingRate * 100), purchaseUnits, quickAddUnits,
+    lastPurchaseDaysAgo: daysAgo(purchases[0]), purchases30: purchases.filter((x) => recent(x)).length,
+    lastCountDaysAgo: countAge, missingAtLastCount: missingItems, billDaysLast7: billDays,
+    topSellersOut: topOut, topSellersLow: topLow, productsWithoutCost: noCost, products: products.length,
+  };
+}
+
+function lessons(shopId, h) {
+  const today = istDay(Date.now());
+  return [
+    { id: 'wholesale', title: 'Enter every wholesale delivery', done: h.lastPurchaseDaysAgo !== null && h.lastPurchaseDaysAgo <= 7,
+      steps: ['When the wholesaler\'s goods arrive, keep their bill (parchi) in hand.', 'Open Inventory → 📦 Wholesale stock-in.', 'Enter the supplier, bill number, and each item with quantity and cost price.', 'Save. Stock goes up, and your margins are now known.'],
+      why: 'If stock comes in without an entry, the app thinks you have less than you do, and online customers see "out of stock".' },
+    { id: 'bill', title: 'Bill every sale, even ₹10', done: db.orders.some((o) => o.shopId === shopId && o.channel === 'walk_in' && istDay(o.at) === today),
+      steps: ['Customer at the counter? Open Billing.', 'Tap Add on each item, or search it.', 'Choose Cash, UPI QR or Khata, then save.', 'Stock goes down by itself; no need to subtract anything.'],
+      why: 'Every sale without a bill makes your stock look higher than the shelf. Then you promise items online that you don\'t have.' },
+    { id: 'count', title: 'Count your stock once a week', done: h.lastCountDaysAgo !== null && h.lastCountDaysAgo <= 7,
+      steps: ['Pick a quiet time, e.g. Sunday morning.', 'Open Inventory → 🧮 Count stock.', 'Type what is actually on the shelf. Start with your 10 fastest-selling items.', 'Save. Anything missing shows up; those were usually sold without a bill.'],
+      why: 'The count fixes any mismatch and shows you where sales are slipping through without bills.' },
+    { id: 'alerts', title: 'Never run out of best-sellers', done: !h.topSellersOut.length && !h.topSellersLow.length,
+      steps: ['Check the ⚠ items in Inventory every evening.', 'Add them to tomorrow\'s wholesale list.', 'When they arrive, enter them with 📦 Wholesale stock-in.'],
+      why: 'A customer who finds an empty shelf may go to the next shop and not come back.' },
+  ];
+}
+
+function localCoachTips(shop, h) {
+  const tips = [];
+  if (h.unbilledUnits > 0) {
+    const worst = h.missingAtLastCount.slice(0, 3).map((m) => `${m.name} (${m.missing})`).join(', ');
+    tips.push({ habit: 'billing', tip: `At your stock counts, ${h.unbilledUnits} ${h.unbilledUnits === 1 ? 'unit was' : 'units were'} missing${worst ? `: ${worst}` : ''}. These were most likely sold without a bill. Make Billing the first thing you open for every counter sale, even for one Maggi.` });
+  }
+  if (h.quickAddUnits > h.purchaseUnits) {
+    tips.push({ habit: 'wholesale', tip: `${h.quickAddUnits} units were added with quick "+ Add" but only ${h.purchaseUnits} through a wholesale bill. Use 📦 Wholesale stock-in when goods arrive, so you also record cost price and the supplier. Then you'll know your real profit on each item.` });
+  } else if (h.lastPurchaseDaysAgo === null || h.lastPurchaseDaysAgo > 7) {
+    tips.push({ habit: 'wholesale', tip: `No wholesale delivery entered ${h.lastPurchaseDaysAgo === null ? 'yet' : `in ${h.lastPurchaseDaysAgo} days`}. Next time goods arrive, enter them before they go on the shelf. It takes about 2 minutes with the bill in hand.` });
+  }
+  if (h.lastCountDaysAgo === null || h.lastCountDaysAgo > 7) {
+    tips.push({ habit: 'counting', tip: `${h.lastCountDaysAgo === null ? 'You have never counted your stock.' : `Your last stock count was ${h.lastCountDaysAgo} days ago.`} Pick a fixed time each week (Sunday morning works for most shops) and count your 10 fastest-selling items first.` });
+  }
+  if (h.topSellersOut.length || h.topSellersLow.length) {
+    tips.push({ habit: 'shelf', tip: `Your best-sellers are running out: ${[...h.topSellersOut, ...h.topSellersLow].slice(0, 4).join(', ')}. Put them on your next wholesale list today.` });
+  }
+  if (h.billDaysLast7 < 5) tips.push({ habit: 'billing', tip: `You billed on only ${h.billDaysLast7} of the last 7 days. If the shop was open on the other days, those sales are missing from your stock.` });
+  if (!tips.length) tips.push({ habit: 'all', tip: 'Shabash! Your stock-keeping is in great shape. Keep billing every sale and counting weekly.' });
+  const weakest = Object.entries(h.parts).sort((a, b) => a[1].score / a[1].max - b[1].score / b[1].max)[0];
+  return saveCoachTips({
+    shopId: shop.id, source: 'local', tips: tips.slice(0, 4),
+    summary: `Your stock-keeping score is ${h.score}/100. Focus this week: ${weakest[1].label.toLowerCase()}.`,
+  });
+}
+
+function saveCoachTips({ shopId, summary, tips, source }) {
+  if (!db.shops.some((s) => s.id === shopId)) throw new Error('Unknown shopId');
+  const entry = {
+    id: id(), shopId, source: source || 'agenticorg', summary: String(summary || '').slice(0, 500),
+    tips: (tips || []).slice(0, 6).map((x) => ({ habit: String(x.habit || 'general').slice(0, 20), tip: String(x.tip || '').slice(0, 400) })).filter((x) => x.tip),
+    at: now(),
+  };
+  db.coachTips.push(entry);
+  log('agent', 'coach_tips_saved', { shopId, tips: entry.tips.length, source: entry.source });
+  return entry;
+}
+
+// Plain answers for the most common questions, used when the AgenticOrg coach isn't reachable.
+const FAQ = [
+  [/wholesale|supplier|delivery|purchase|maal|aaya|stock.?in|arrived|bought/i, 'When goods arrive from the wholesaler: open Inventory → 📦 Wholesale stock-in. Enter the supplier and bill number, then each item with quantity and cost price, and save. Stock goes up by itself. If an item is new, first add it under "+ Add a product" with opening stock 0.'],
+  [/bill|sale|sold|counter|customer.*buy|becha/i, 'For every counter sale: open Billing, tap Add on each item, choose Cash / UPI QR / Khata, and save. Stock goes down by itself. Bill even small sales; unbilled sales are why the app\'s stock and your shelf stop matching.'],
+  [/count|mismatch|missing|wrong|shelf|match|galat/i, 'If the app\'s stock doesn\'t match the shelf: open Inventory → 🧮 Count stock, type what you actually have, and save. The app corrects itself and shows what was missing, which was usually sold without a bill. Do this once a week.'],
+  [/damage|expired|broken|kharab|waste|return/i, 'For damaged or expired items: open 🧮 Count stock and enter the good quantity left. The difference is removed from stock. For items you return to the supplier, do the same after the return.'],
+  [/new (item|product)|add (item|product)|naya/i, 'To add a new item: Inventory → "+ Add a product". Put opening stock as 0, then enter the actual quantity through 📦 Wholesale stock-in so the cost price is recorded too.'],
+  [/price|rate|mrp|cost|margin|profit/i, 'To change a selling price, tap the price in Inventory. The cost price comes from your wholesale stock-in entries, so always enter the wholesale rate there. That is how you know your profit on each item.'],
+  [/low|out of stock|khatam|reorder|alert/i, 'Items marked ⚠ in Inventory are at or below their alert level. Check them every evening and put them on tomorrow\'s wholesale list. Premium shops also get the AI stock advisor in Insights.'],
+];
+
+app.get('/api/owner/coach', ownerAuth, (req, res) => {
+  const h = inventoryHabits(req.shop.id);
+  res.json({ habits: h, lessons: lessons(req.shop.id, h), tips: db.coachTips.filter((x) => x.shopId === req.shop.id).at(-1) || null });
+});
+
+app.post('/api/owner/coach/tips', ownerAuth, async (req, res) => {
+  const shop = req.shop;
+  const before = db.coachTips.length;
+  let agentStatus;
+  if (agenticorg.isConfigured('coach')) {
+    try {
+      const run = await agenticorg.runAgent('coach', { task: `Coach shop ${shop.id} (${shop.shopName}) on keeping inventory accurate.`, shopId: shop.id, ownerName: shop.ownerName });
+      agentStatus = run.status;
+      log('agent', 'agenticorg_run', { agent: 'coach', shopId: shop.id, runId: run.runId, status: run.status });
+    } catch (err) {
+      log('agent', 'agenticorg_run_failed', { agent: 'coach', shopId: shop.id, error: err.message });
+    }
+  }
+  const fresh = db.coachTips.slice(before).find((x) => x.shopId === shop.id);
+  res.json({ ...(fresh || localCoachTips(shop, inventoryHabits(shop.id))), agentStatus });
+});
+
+app.post('/api/owner/coach/ask', ownerAuth, async (req, res) => {
+  const question = String(req.body.question || '').trim().slice(0, 300);
+  if (!question) fail(400, 'Type your question');
+  const shop = req.shop;
+  if (agenticorg.isConfigured('coach')) {
+    try {
+      const run = await agenticorg.runAgent('coach', { task: `Shop owner question: "${question}". Answer simply in 2-4 short steps.`, question, shopId: shop.id, ownerName: shop.ownerName });
+      log('agent', 'agenticorg_run', { agent: 'coach', shopId: shop.id, runId: run.runId, status: run.status });
+      const answer = agenticorg.outputText(run.output);
+      if (run.status === 'completed' && answer) return res.json({ answer, source: 'agenticorg' });
+    } catch (err) {
+      log('agent', 'agenticorg_run_failed', { agent: 'coach', shopId: shop.id, error: err.message });
+    }
+  }
+  const hit = FAQ.find(([re]) => re.test(question));
+  log('shopkeeper', 'coach_question', { shopId: shop.id, matched: Boolean(hit) });
+  res.json({
+    source: 'local',
+    answer: hit ? hit[1] : 'I can help with: entering wholesale deliveries, billing every sale, counting stock, damaged or expired items, adding new items, prices and margins, and low-stock alerts. Try asking about one of these.',
+  });
+});
+
 // ---- Khata (udhaar) ----
 app.get('/api/owner/khata', ownerAuth, (req, res) => {
   const shopId = req.shop.id;
@@ -1118,6 +1334,21 @@ function buildMcpServer() {
     inputSchema: { shopId: z.string() },
     annotations: { readOnlyHint: true },
   }, async ({ shopId }) => asText(shopInventory(shopId)));
+  server.registerTool('get_inventory_habits', {
+    description: 'Inventory coach: how well a shop keeps its stock records in sync with the shelf (last 30 days): billed vs unbilled units found at stock counts, wholesale entries vs quick adds, days since last count/purchase, best-sellers out or low, and a 0-100 score broken into parts.',
+    inputSchema: { shopId: z.string() },
+    annotations: { readOnlyHint: true },
+  }, async ({ shopId }) => asText(inventoryHabits(shopId)));
+  server.registerTool('save_coach_tips', {
+    description: 'Inventory coach: save personalised coaching tips for a shop owner. They are shown in the Coach tab; nothing is changed in the shop.',
+    inputSchema: {
+      shopId: z.string(),
+      summary: z.string().describe('One or two encouraging sentences with the score and the one habit to focus on this week'),
+      tips: z.array(z.object({ habit: z.enum(['billing', 'wholesale', 'counting', 'shelf', 'general']), tip: z.string() })).max(6),
+    },
+  }, async (args) => {
+    try { return asText(saveCoachTips(args)); } catch (err) { return { ...asText({ error: err.message }), isError: true }; }
+  });
   server.registerTool('save_stock_suggestions', {
     description: 'Demand advisor: save stock suggestions for a shop. They are only shown to the shop owner, who accepts or dismisses each one; nothing is ordered automatically.',
     inputSchema: {

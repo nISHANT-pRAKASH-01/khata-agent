@@ -52,7 +52,7 @@ const CUSTOMERS = [
 
 export function seed({ id, endOfDayIST, istMidnight }) {
   const now = Date.now();
-  const db = { shops: [], customers: [], products: [], orders: [], payments: [], stockMoves: [], views: [], entries: [], reminders: [], logs: [] };
+  const db = { shops: [], customers: [], products: [], orders: [], payments: [], stockMoves: [], views: [], entries: [], reminders: [], logs: [], purchases: [], stockCounts: [] };
   const jitter = () => (rand() - 0.5) * 0.02;
 
   for (const c of CUSTOMERS) db.customers.push({ id: id(), name: c[0], phone: c[1], prefHour: c[2], area: pick(SHOPS).area, mock: true, at: new Date(now - 40 * DAY).toISOString() });
@@ -66,7 +66,7 @@ export function seed({ id, endOfDayIST, istMidnight }) {
     };
     db.shops.push(shop);
     const products = CATALOG[sh.category].map(([name, category, unit, price]) => ({
-      id: id(), shopId: shop.id, name, category, unit, price, stock: 5 + Math.floor(rand() * 40), lowStockAt: 5, mock: true,
+      id: id(), shopId: shop.id, name, category, unit, price, cost: Math.round(price * (0.78 + rand() * 0.1)), stock: 5 + Math.floor(rand() * 40), lowStockAt: 5, mock: true,
     }));
     // A couple of items start low so the low-stock alert has something to show.
     products[1].stock = 3;
@@ -101,6 +101,8 @@ export function seed({ id, endOfDayIST, istMidnight }) {
     }
   }
 
+  seedHabits(db, { id });
+
   // Some open udhaar so the khata agent has dues to work on.
   for (const shop of db.shops) {
     for (const c of db.customers.slice(0, 3)) {
@@ -108,4 +110,39 @@ export function seed({ id, endOfDayIST, istMidnight }) {
     }
   }
   return db;
+}
+
+// Inventory habits for the coach: Sharma enters every wholesale delivery and counts weekly;
+// Gupta tops up stock with quick "+ Add" and its last count found items sold without a bill.
+export function seedHabits(db, { id }) {
+  const now = Date.now();
+  const habits = { 'Sharma General Store': 'good', 'Gupta Kirana': 'poor' };
+  db.shops.filter((shop) => shop.mock).forEach((shop, si) => {
+    const habit = habits[shop.shopName] || 'average';
+    const products = db.products.filter((p) => p.shopId === shop.id);
+    for (const p of products) p.cost ??= Math.round(p.price * 0.83); // older data had no cost price
+    const purchases = { good: 4, average: 1, poor: 0 }[habit];
+    for (let i = 0; i < purchases; i++) {
+      const at = new Date(now - (3 + i * 7) * DAY).toISOString();
+      const lines = products.slice(i % 3, (i % 3) + 4).map((p) => ({ productId: p.id, name: p.name, qty: 10 + Math.floor(rand() * 20), cost: p.cost }));
+      const pid = id();
+      db.purchases.push({ id: pid, shopId: shop.id, supplier: pick(['Metro Cash & Carry', 'Jumbotail', 'Sri Lakshmi Wholesale', 'Udaan']), invoiceNo: `INV-${1000 + si * 100 + i}`, lines, total: lines.reduce((t, l) => t + l.qty * l.cost, 0), mock: true, at });
+      for (const l of lines) db.stockMoves.push({ id: id(), shopId: shop.id, productId: l.productId, delta: l.qty, reason: 'purchase', refId: pid, mock: true, at });
+    }
+    const quickAdds = { good: 1, average: 4, poor: 9 }[habit];
+    for (let i = 0; i < quickAdds; i++) {
+      const p = pick(products);
+      db.stockMoves.push({ id: id(), shopId: shop.id, productId: p.id, delta: 5 + Math.floor(rand() * 15), reason: 'restock', mock: true, at: new Date(now - Math.floor(1 + rand() * 25) * DAY).toISOString() });
+    }
+    if (habit !== 'average') {
+      const cid = id();
+      const at = new Date(now - (habit === 'good' ? 3 : 12) * DAY).toISOString();
+      const lines = products.slice(0, 8).map((p, i) => {
+        const diff = habit === 'good' ? (i === 2 ? -1 : 0) : -[3, 0, 5, 2, 0, 4, 1, 0][i];
+        return { productId: p.id, name: p.name, expected: p.stock - diff, counted: p.stock, diff };
+      });
+      db.stockCounts.push({ id: cid, shopId: shop.id, lines, mock: true, at });
+      for (const l of lines.filter((l) => l.diff)) db.stockMoves.push({ id: id(), shopId: shop.id, productId: l.productId, delta: l.diff, reason: 'count_adjust', refId: cid, mock: true, at });
+    }
+  });
 }

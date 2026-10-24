@@ -8,6 +8,7 @@ const AGENTS = {
   khata: 'AGENTICORG_AGENT_ID',
   shopper: 'AGENTICORG_SHOPPER_AGENT_ID',
   demand: 'AGENTICORG_DEMAND_AGENT_ID',
+  coach: 'AGENTICORG_COACH_AGENT_ID',
 };
 
 export const isConfigured = (agent = 'khata') =>
