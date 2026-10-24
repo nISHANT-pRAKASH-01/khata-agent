@@ -47,10 +47,14 @@
       <div id="aResult"></div>
     </div>
     <div class="row" style="margin-top:8px">
-      <select id="area" class="grow" onchange="loadShops()"></select>
       <input id="q" class="grow" placeholder="Search shop or item, e.g. atta" oninput="debouncedShops()">
+      <select id="area" onchange="loadShops()" title="Used when your live location is off"></select>
     </div>
-    <div id="shops" class="grid" style="margin-top:12px"></div>
+    <div class="row muted" id="locBar" style="margin-top:8px"></div>
+    <div id="featuredBox"></div>
+    <h3 style="margin-top:12px" id="nearTitle">Shops near you</h3>
+    <div id="shops" class="grid"></div>
+    <div id="farBox" style="margin-top:12px"></div>
   </section>
 
   <!-- One shop -->
@@ -121,13 +125,16 @@ const call = async (path, opts) => {
   try { return await api(path, auth(opts)); } catch (err) { if (err.status === 401) logout(); throw err; }
 };
 
+let areaCentres = {};
+const areaCentre = () => areaCentres[me?.area] || areaCentres[$('area').value] || null;
+
 function show(view) {
   for (const v of ['login', 'profile', 'shops', 'shop', 'checkout', 'orders', 'track']) $('v-' + v).classList.toggle('hidden', v !== view);
   $('who').textContent = me ? `Hi, ${me.name}` : '';
   $('ordersBtn').classList.toggle('hidden', !me?.profileDone);
   $('logoutBtn').classList.toggle('hidden', !me);
   if (view !== 'track') stopTracking();
-  if (view === 'shops') loadShops();
+  if (view === 'shops') { startLiveLocation(); loadShops(); }
   if (view === 'shop') renderProducts();
   if (view === 'checkout') renderCheckout();
   if (view === 'orders') loadOrders();
@@ -135,10 +142,11 @@ function show(view) {
 }
 
 async function init() {
-  const areas = await api('/api/areas');
+  const [areas, cfg] = await Promise.all([api('/api/areas'), api('/api/config')]);
+  areaCentres = cfg.areas || {};
   const opts = areas.map((a) => `<option>${esc(a)}</option>`).join('');
   $('pArea').innerHTML = opts;
-  $('area').innerHTML = '<option value="">All areas</option>' + opts;
+  $('area').innerHTML = opts;
   // A saved session may be stale (logged out elsewhere, data reset): check it with the server first.
   if (token) {
     const r = await fetch('/api/customers/me', { headers: { 'x-customer-token': token } });
@@ -184,16 +192,50 @@ function logout() {
 let shopsTimer;
 const debouncedShops = () => { clearTimeout(shopsTimer); shopsTimer = setTimeout(loadShops, 250); };
 
-async function loadShops() {
-  const params = new URLSearchParams({ area: $('area').value, q: $('q').value.trim() });
-  const shops = await api('/api/market/shops?' + params);
-  $('shops').innerHTML = shops.map((s) => `
+// ---- live location: asked once, then kept up to date while the page is open ----
+let watchId = null, locState = 'off';
+function startLiveLocation() {
+  if (watchId !== null || !navigator.geolocation) { renderLocBar(); return; }
+  locState = 'asking'; renderLocBar();
+  watchId = navigator.geolocation.watchPosition((pos) => {
+    const next = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+    const moved = !myLocation || distKm(myLocation, next) > 0.3; // refresh the list after moving ~300 m
+    myLocation = next; locState = 'live'; renderLocBar();
+    if (moved && !$('v-shops').classList.contains('hidden')) loadShops();
+  }, () => { locState = 'denied'; watchId = null; renderLocBar(); }, { enableHighAccuracy: false, maximumAge: 60000, timeout: 20000 });
+}
+function renderLocBar() {
+  const area = $('area').value || 'your area';
+  $('locBar').innerHTML = {
+    live: '📍 <strong>Using your live location</strong>: nearest shops first',
+    asking: '📍 Finding your location…',
+    denied: `📍 Showing shops near <strong>${esc(area)}</strong>. Location is off. <button class="small secondary" onclick="watchId=null;startLiveLocation()">Use my location</button>`,
+    off: `📍 Showing shops near <strong>${esc(area)}</strong>`,
+  }[locState];
+}
+
+let showAllFar = false;
+const shopCard = (s) => `
     <button class="shop-card ${s.premium ? 'featured' : ''}" onclick="openShop('${s.id}')">
       ${s.premium ? '<span class="badge premium">★ Featured</span> ' : ''}<span class="badge">${esc(s.category)}</span>
       <h3 style="margin-top:8px">${esc(s.shopName)}</h3>
+      ${s.distanceKm != null ? `<div><strong>📍 ${travelText(s.distanceKm)}</strong></div>` : ''}
       <div class="muted">${esc(s.area)} · ${s.items} items in stock</div>
       <div class="muted">${s.delivery ? '🛵 Delivery or pickup' : '🛍️ Order ahead, pick up packed'}</div>
-    </button>`).join('') || '<p class="muted">No shops open here today. Try "All areas".</p>';
+    </button>`;
+
+async function loadShops() {
+  const params = new URLSearchParams({ area: $('area').value, q: $('q').value.trim() });
+  if (myLocation) { params.set('lat', myLocation.lat); params.set('lng', myLocation.lng); }
+  const r = await api('/api/market/shops?' + params);
+  renderLocBar();
+  $('featuredBox').innerHTML = r.featured.length ? `<h3 style="margin-top:12px">★ Featured shops</h3><div class="grid">${r.featured.map(shopCard).join('')}</div>` : '';
+  $('nearTitle').textContent = r.near.length ? `Shops near you (within ${r.nearKm} km)` : 'No other shops right next to you yet';
+  $('shops').innerHTML = r.near.map(shopCard).join('');
+  if (!r.far.length) { $('farBox').innerHTML = r.near.length || r.featured.length ? '' : '<p class="muted">No shops are open today.</p>'; return; }
+  $('farBox').innerHTML = r.showFar || showAllFar
+    ? `<h3>${r.near.length ? 'Farther away' : 'Nearest open shops'}</h3><div class="grid">${r.far.map(shopCard).join('')}</div>`
+    : `<button class="secondary block" onclick="showAllFar=true;loadShops()">Show ${r.far.length} farther shop${r.far.length > 1 ? 's' : ''}</button>`;
 }
 
 async function openShop(id, prefill) {
@@ -221,7 +263,7 @@ async function askAssistant() {
       ${r.shops.map((s, i) => `<div class="card" style="margin:8px 0">
         <div class="row"><strong class="grow">${i === 0 ? '🏆 ' : ''}${esc(s.shopName)}</strong>${s.premium ? '<span class="badge premium">★</span>' : ''}
           <span class="badge">${s.found.length}/${r.wanted.length} items</span></div>
-        <div class="muted">${esc(s.area)}${s.distanceKm != null ? ` · ${s.distanceKm} km` : ''} · about ${rupees(s.total)} · ${s.delivery ? 'delivery or pickup' : 'pickup'}</div>
+        <div class="muted">${s.distanceKm != null ? `<strong>📍 ${travelText(s.distanceKm)}</strong> · ` : ''}${esc(s.area)} · about ${rupees(s.total)} · ${s.delivery ? 'delivery or pickup' : 'pickup'}</div>
         <div style="margin:6px 0">${s.found.map((f) => `✓ ${esc(f.name)} ×${f.qty}`).join('<br>')}${s.missing.length ? `<br><span class="muted">✗ Not here: ${s.missing.map(esc).join(', ')}</span>` : ''}</div>
         <button class="small" onclick="openShop('${s.shopId}', assistResult.shops[${i}].found)">Order these from ${esc(s.shopName)} →</button>
       </div>`).join('')}`;
@@ -230,7 +272,9 @@ async function askAssistant() {
 
 function renderProducts() {
   $('shopName').textContent = shop.shopName;
-  $('shopMeta').textContent = `${shop.area} · ${shop.ownerName} · ${shop.delivery ? 'Delivery or pickup' : 'Pickup only: order ahead, collect packed'}`;
+  const d = distKm(myLocation || areaCentre(), shop);
+  $('shopMeta').innerHTML = `${d != null ? `<strong>📍 ${travelText(d)}</strong> · ` : ''}${esc(shop.area)} · ${esc(shop.ownerName)} · ${shop.delivery ? 'Delivery or pickup' : 'Pickup only: order ahead, collect packed'}
+    <br><a href="${directionsUrl(shop)}" target="_blank"><button class="small secondary" style="margin-top:8px">🧭 Directions</button></a>`;
   const byCat = {};
   for (const p of products) (byCat[p.category] ??= []).push(p);
   $('products').innerHTML = Object.entries(byCat).map(([cat, list]) => `
@@ -324,6 +368,7 @@ async function loadOrders() {
       <div class="row"><strong class="grow">${rupees(o.total)} <span class="badge ${o.paymentStatus}">${esc(payText(o))}</span></strong>
         ${o.paymentLink && o.status !== 'cancelled' ? `<button class="small" onclick="openPayment('${esc(o.paymentLink)}', '/customer.html?orders=1')">Pay ${rupees(o.total)}</button>` : ''}
         ${o.status === 'out_for_delivery' ? `<button class="small" onclick="track('${o.id}')">🛵 Track live</button>` : ''}
+        ${o.fulfilment === 'pickup' && o.shopLocation && !['completed', 'cancelled'].includes(o.status) ? `<a href="${directionsUrl(o.shopLocation)}" target="_blank"><button class="small secondary">🧭 Directions</button></a>` : ''}
         <a href="${esc(waUrl(o.shopPhone, `Hi ${o.shopName}, about my order #${o.id} (${rupees(o.total)})`))}" target="_blank"><button class="small secondary">WhatsApp shop</button></a>
         ${o.status === 'placed' ? `<button class="small secondary" onclick="cancelOrder('${o.id}')">Cancel</button>` : ''}</div>
     </div>`;

@@ -283,16 +283,33 @@ app.patch('/api/customers/me', customerAuth, (req, res) => {
 app.get('/api/areas', (req, res) => res.json([...new Set([...Object.keys(AREA_CENTERS), ...db.shops.map((s) => s.area)].filter(Boolean))].sort()));
 
 // Premium shops are "featured" in every area; day-pass shops show only in their own area.
+// Shops sorted by distance from the customer (live GPS if shared, else their area's centre).
+// "Near" = within NEAR_KM (or, without GPS, in the customer's own area). Premium shops get their own
+// "Featured" row at the top wherever they are — that's the reach they pay for.
+// When few shops are near, the app also shows the farther ones so the list is never empty.
+const NEAR_KM = 4;
+const MIN_NEARBY = 6;
+const isNear = (distanceKm, shop, area) => (distanceKm !== null && distanceKm <= NEAR_KM) || (!!area && shop.area === area);
+const distanceFrom = (from, shop) => from && Number.isFinite(shop.lat) ? Math.round(km(from, shop) * 10) / 10 : null;
+
 app.get('/api/market/shops', (req, res) => {
   const { area, q } = req.query;
+  const live = { lat: Number(req.query.lat), lng: Number(req.query.lng) };
+  const from = validPoint(live) ? live : AREA_CENTERS[area] || null;
   const needle = (q || '').toLowerCase();
   const shops = db.shops.filter(planActive)
-    .filter((s) => !area || s.area === area || isPremium(s))
     .filter((s) => !needle || s.shopName.toLowerCase().includes(needle) ||
       db.products.some((p) => p.shopId === s.id && p.name.toLowerCase().includes(needle)))
-    .map((s) => ({ ...publicShop(s), items: db.products.filter((p) => p.shopId === s.id && p.stock > 0).length }))
-    .sort((a, b) => (b.premium - a.premium) || ((b.area === area) - (a.area === area)));
-  res.json(shops);
+    .map((s) => {
+      const distanceKm = distanceFrom(from, s);
+      return { ...publicShop(s), items: db.products.filter((p) => p.shopId === s.id && p.stock > 0).length, distanceKm,
+        near: isNear(distanceKm, s, validPoint(live) ? null : area) };
+    })
+    .sort((a, b) => (a.distanceKm ?? 999) - (b.distanceKm ?? 999));
+  const featured = shops.filter((s) => s.premium);
+  const near = shops.filter((s) => s.near && !s.premium);
+  const far = shops.filter((s) => !s.near && !s.premium);
+  res.json({ featured, near, far, showFar: near.length + featured.filter((s) => s.near).length < MIN_NEARBY, from: validPoint(live) ? 'gps' : from ? 'area' : 'none', nearKm: NEAR_KM });
 });
 
 app.get('/api/market/shops/:id', (req, res) => {
@@ -344,7 +361,7 @@ const orderForCustomer = (o) => {
   const shop = shopOf(o);
   return {
     ...o, idempotencyKey: undefined,
-    shopName: shop?.shopName, shopPhone: shop?.phone, shopArea: shop?.area,
+    shopName: shop?.shopName, shopPhone: shop?.phone, shopArea: shop?.area, shopLocation: shop && { lat: shop.lat, lng: shop.lng },
     paymentLink: o.paymentId && o.paymentStatus === 'pending' ? db.payments.find((p) => p.id === o.paymentId)?.link : undefined,
     rider: o.rider && { name: o.rider.name, phone: o.rider.phone, lat: o.rider.lat, lng: o.rider.lng, at: o.rider.at },
   };
@@ -948,7 +965,7 @@ const km = (a, b) => {
 function matchShops({ items, area, location }) {
   const wanted = (items || []).filter((i) => i?.name).slice(0, 25).map((i) => ({ name: String(i.name).slice(0, 60), qty: Math.max(1, Math.min(Number(i.qty) || 1, 20)) }));
   const from = validPoint(location) ? location : AREA_CENTERS[area];
-  const rank = (inArea) => db.shops.filter(planActive).filter((s) => !inArea || s.area === inArea || isPremium(s)).map((shop) => {
+  const all = db.shops.filter(planActive).map((shop) => {
     const found = [], missing = [];
     for (const w of wanted) {
       const p = bestProduct(shop.id, w.name);
@@ -959,14 +976,15 @@ function matchShops({ items, area, location }) {
       shopId: shop.id, shopName: shop.shopName, area: shop.area, premium: isPremium(shop), delivery: isPremium(shop),
       found, missing, coverage: wanted.length ? found.length / wanted.length : 0,
       total: found.reduce((t, f) => t + f.price * f.qty, 0),
-      distanceKm: from && Number.isFinite(shop.lat) ? Math.round(km(from, shop) * 10) / 10 : null,
+      distanceKm: distanceFrom(from, shop),
+      near: isNear(distanceFrom(from, shop), shop, validPoint(location) ? null : area),
     };
   }).filter((s) => s.found.length)
-    .sort((a, b) => b.coverage - a.coverage || (a.distanceKm ?? 99) - (b.distanceKm ?? 99) || a.total - b.total)
-    .slice(0, 3);
-  // Nothing in the customer's area? Look across all areas rather than come back empty.
-  let shops = rank(area), widened = false;
-  if (!shops.length && area) { shops = rank(null); widened = shops.length > 0; }
+    .sort((a, b) => b.coverage - a.coverage || (a.distanceKm ?? 99) - (b.distanceKm ?? 99) || a.total - b.total);
+  // Nearby shops first; if fewer than 3 nearby have anything, fill up with farther ones.
+  const nearby = all.filter((s) => s.near).slice(0, 3);
+  const shops = nearby.length >= 3 ? nearby : [...nearby, ...all.filter((s) => !s.near)].slice(0, 3);
+  const widened = shops.some((s) => !s.near);
   const nowhere = wanted.filter((w) => !shops.some((s) => s.found.some((f) => f.wanted === w.name))).map((w) => w.name);
   return { wanted, shops, nowhere, widened };
 }
@@ -974,7 +992,7 @@ function matchShops({ items, area, location }) {
 function localSummary(r) {
   if (!r.shops.length) return `Sorry, no open shop nearby has these items right now.`;
   const top = r.shops[0];
-  return `${r.widened ? 'Nothing in your area, but ' : ''}${top.shopName} has ${top.found.length} of your ${r.wanted.length} items for about ₹${top.total}${top.distanceKm != null ? `, ${top.distanceKm} km away` : ''}.` +
+  return `${r.widened && !top.near ? 'Not much nearby, but ' : ''}${top.shopName} has ${top.found.length} of your ${r.wanted.length} items for about ₹${top.total}${top.distanceKm != null ? `, ${top.distanceKm} km away` : ''}.` +
     (top.missing.length ? ` Not there: ${top.missing.join(', ')}.` : ' Everything is in stock!') +
     (r.nowhere.length ? ` Nobody nearby has ${r.nowhere.join(', ')} right now.` : '');
 }

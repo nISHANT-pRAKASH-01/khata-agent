@@ -86,6 +86,21 @@ async function mountSignIn(el, role, onToken) {
   }
 }
 
+// Straight-line distance in km, and a friendly travel estimate (roads ≈ 1.3× the straight line).
+function distKm(a, b) {
+  if (!a || !b || !Number.isFinite(a.lat) || !Number.isFinite(b.lat)) return null;
+  const R = 6371, r = Math.PI / 180, dLat = (b.lat - a.lat) * r, dLng = (b.lng - a.lng) * r;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+function travelText(km) {
+  if (km == null) return '';
+  const road = km * 1.3;
+  return road < 1 ? `${Math.max(50, Math.round(km * 100) * 10)} m · ${Math.max(1, Math.round((road / 5) * 60))} min walk`
+    : `${km.toFixed(1)} km · ${Math.max(2, Math.round((road / 18) * 60))} min by bike`;
+}
+const directionsUrl = (p) => `https://www.google.com/maps/dir/?api=1&destination=${p.lat},${p.lng}`;
+
 // Opens a payment link: Pine Labs in a new tab, the test page in the same tab.
 function openPayment(link, back = location.pathname) {
   if (!link) return;
