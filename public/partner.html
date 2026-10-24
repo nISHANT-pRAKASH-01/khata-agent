@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deliver — Uncle Store</title>
+<link rel="stylesheet" href="/styles.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+</head>
+<body>
+<header class="top"><div class="bar">
+  <a class="logo" href="/">Uncle<span>Store</span></a><span class="muted">· Delivery</span><span class="spacer"></span>
+  <button class="ghost small hidden" id="logoutBtn" onclick="logout()">Log out</button>
+</div></header>
+<main>
+  <!-- Sign in -->
+  <section id="v-auth" class="hidden">
+    <div class="card" style="max-width:440px;margin:24px auto">
+      <h2>Deliver with Uncle Store</h2>
+      <p class="muted">Pick up orders from shops near you and deliver them in your area. Earn on every trip.</p>
+      <div id="signin"></div>
+    </div>
+    <div class="grid two" style="max-width:880px;margin:0 auto" id="authPlans"></div>
+  </section>
+
+  <!-- Profile -->
+  <section id="v-profile" class="hidden">
+    <div class="card" style="max-width:520px;margin:24px auto">
+      <p class="muted" style="margin:0">Step 1 of 2</p>
+      <h2>Your details</h2>
+      <label>Your name</label><input id="pName" autocomplete="name">
+      <div class="row">
+        <div class="grow"><label>Phone</label><input id="pPhone" inputmode="numeric" maxlength="10" placeholder="10-digit mobile"></div>
+        <div class="grow"><label>UPI ID (for your earnings)</label><input id="pUpi" placeholder="e.g. 9876543210@ybl"></div>
+      </div>
+      <h3 style="margin-top:16px">Where do you usually start from?</h3>
+      <p class="muted">We show you jobs from shops near here when your live location is off.</p>
+      <div id="homePicker"></div>
+      <button class="block" style="margin-top:12px" onclick="saveProfile()">Continue</button>
+    </div>
+  </section>
+
+  <!-- Plan -->
+  <section id="v-plan" class="hidden">
+    <div style="max-width:880px;margin:16px auto">
+      <p class="muted" style="margin:0">Step 2 of 2</p>
+      <h2>Choose how you earn</h2>
+      <p class="muted">Every delivery has a ₹25 delivery fee. Your plan decides how much of it you keep.</p>
+      <div class="grid two" id="planCards"></div>
+    </div>
+  </section>
+
+  <!-- Dashboard -->
+  <section id="v-app" class="hidden">
+    <div class="card" id="statusCard"></div>
+    <div class="grid" id="earnTiles" style="grid-template-columns:repeat(3,1fr);gap:8px"></div>
+    <div id="jobBox"></div>
+    <div id="jobsBox"></div>
+    <div class="card">
+      <div class="row"><h3 class="grow" style="margin:0">Recent deliveries</h3><button class="small secondary" onclick="show('plan')">Change plan</button></div>
+      <div id="history" style="margin-top:8px"></div>
+    </div>
+  </section>
+</main>
+<script src="/common.js"></script>
+<script>
+let token = store.get('partnerToken');
+let me = null, cfg = null, homePicker = null, myLoc = null, watchId = null, jobMap = null, jobLayers = {};
+const auth = (extra) => ({ headers: { 'x-partner-token': token }, ...extra });
+const call = async (path, opts) => {
+  try { return await api(path, auth(opts)); } catch (err) { if (err.status === 401) logout(); throw err; }
+};
+
+function show(view) {
+  for (const v of ['auth', 'profile', 'plan', 'app']) $('v-' + v).classList.toggle('hidden', v !== view);
+  $('logoutBtn').classList.toggle('hidden', view === 'auth');
+  if (view === 'plan') $('planCards').innerHTML = planCards(true);
+  scrollTo(0, 0);
+}
+
+// Plan cards with the money a rider actually takes home per delivery.
+function planCards(withButtons) {
+  const fee = cfg.deliveryFee, b = cfg.partnerPlans.basic, p = cfg.partnerPlans.pro;
+  const breakEven = Math.ceil(p.price / (fee * (p.share - b.share)));
+  const current = (key) => me && (key === 'pro' ? me.pro : me.plan && !me.pro);
+  const btn = (key, text) => withButtons ? `<button class="block ${key === 'pro' ? '' : 'secondary'}" ${current(key) ? 'disabled' : ''} onclick="choosePlan('${key}')">${current(key) ? '✓ Your plan' : text}</button>` : '';
+  return `
+    <div class="card plan"><h3>Basic</h3><div class="price">Free</div>
+      <ul class="muted"><li>Keep <strong>${b.share * 100}%</strong> of every delivery fee: <strong>${rupees(fee * b.share)}</strong> per delivery</li><li>No monthly fee. Good if you deliver now and then.</li></ul>
+      ${btn('basic', 'Start free')}</div>
+    <div class="card plan best"><h3>Pro <span class="badge premium">Earn more</span></h3><div class="price">${rupees(p.price)} <span class="muted">/ month</span></div>
+      <ul class="muted"><li>Keep <strong>${p.share * 100}%</strong> of every delivery fee: <strong>${rupees(fee * p.share)}</strong> per delivery</li><li>Pays for itself after about <strong>${breakEven} deliveries</strong> a month (around ${Math.ceil(breakEven / 30)} a day).</li></ul>
+      ${btn('pro', `Get Pro for ${rupees(p.price)}`)}</div>`;
+}
+
+async function init() {
+  cfg = await api('/api/config');
+  if (!token) return showAuth();
+  const r = await call('/api/partner/me').catch(() => null);
+  if (!r) return;
+  me = r.partner;
+  if (!me.profileDone) return showProfile();
+  if (!me.plan) return show('plan');
+  show('app');
+  render(r);
+  if (me.online || r.job) startLocation();
+}
+
+function showAuth() {
+  show('auth');
+  $('authPlans').innerHTML = planCards(false);
+  mountSignIn($('signin'), 'partner', (r) => { token = r.token; store.set('partnerToken', token); init(); });
+}
+function logout() { store.set('partnerToken', null); token = me = null; stopLocation(); showAuth(); }
+
+function showProfile() {
+  $('pName').value = me.name || ''; $('pPhone').value = me.phone || ''; $('pUpi').value = me.upiId || '';
+  show('profile');
+  homePicker = locationPicker($('homePicker'), { initial: me.home, area: me.area, what: 'home' });
+}
+async function saveProfile() {
+  const where = homePicker.value();
+  if (!where.location) return toast('Set your location: use the button, search, or tap the map');
+  me = await call('/api/partner/me', { method: 'PATCH', body: { name: $('pName').value.trim(), phone: $('pPhone').value.trim(), upiId: $('pUpi').value.trim(), area: where.area || 'My area', location: where.location } });
+  show('plan');
+}
+async function choosePlan(plan) {
+  const r = await call('/api/partner/plan', { body: { plan } });
+  if (r.paymentLink) return openPayment(r.paymentLink, '/partner.html');
+  me = r.partner; toast('You are on Basic. Go online to see jobs.'); init();
+}
+
+// ---- dashboard ----
+function render(r) {
+  me = r.partner;
+  $('statusCard').innerHTML = `<div class="row"><div class="grow"><strong>${esc(me.name)}</strong> · ${me.pro ? '<span class="badge premium">Pro</span>' : '<span class="badge">Basic</span>'} · you keep <strong>${Math.round(me.share * 100)}%</strong> (${rupees(cfg.deliveryFee * me.share)} a delivery)
+      <div class="muted">${me.online ? '🟢 Online: jobs near you appear below' : '⚪ Offline: go online to get jobs'}${me.upiId ? '' : ' · ⚠ add your UPI ID to get paid'}</div></div>
+    <button class="${me.online ? 'secondary' : ''}" onclick="setOnline(${!me.online})">${me.online ? 'Go offline' : 'Go online'}</button></div>`;
+  $('earnTiles').innerHTML = `
+    <div class="card"><div class="muted">Today</div><div class="stat">${rupees(me.earnings.today)}</div></div>
+    <div class="card"><div class="muted">Last 7 days</div><div class="stat">${rupees(me.earnings.week)}</div></div>
+    <div class="card"><div class="muted">Deliveries</div><div class="stat">${me.earnings.deliveries}</div><div class="muted">${rupees(me.earnings.total)} earned in total</div></div>`;
+  renderJob(r.job);
+  if (!r.job && me.online) loadJobs(); else $('jobsBox').innerHTML = '';
+  loadHistory();
+}
+
+async function refresh() { if (me) render(await call('/api/partner/me')); }
+
+async function setOnline(online) {
+  if (online) startLocation();
+  me = await call('/api/partner/online', { body: { online, location: myLoc } });
+  if (!online) stopLocation();
+  refresh();
+}
+
+let currentJob = null, lastSent = 0;
+function renderJob(job) {
+  currentJob = job;
+  if (!job) { $('jobBox').innerHTML = ''; jobMap = null; jobLayers = {}; return; }
+  const picked = job.status === 'out_for_delivery';
+  const target = picked ? job.drop : job.pickup;
+  $('jobBox').innerHTML = `<div class="card" style="border-color:var(--brand)">
+    <div class="row"><h3 class="grow" style="margin:0">${picked ? '2 · Deliver to customer' : '1 · Pick up from shop'}</h3><strong>You earn ${rupees(job.payout)}</strong></div>
+    <p style="margin:8px 0">${picked ? `<strong>${esc(job.customerName)}</strong> · ${esc(job.address || '')}` : `<strong>${esc(job.shopName)}</strong> · ${esc(job.shopArea)} · ${job.items} items`}</p>
+    ${job.collectCash ? `<p class="badge pending">Collect ${rupees(job.collectCash)} in cash from the customer</p>` : ''}
+    <div id="jobMap" style="height:240px;border-radius:12px;margin:8px 0"></div>
+    <div class="row">
+      ${target ? `<a href="${directionsUrl(target)}" target="_blank"><button class="small secondary">🧭 Directions</button></a>` : ''}
+      <a href="tel:${esc(picked ? job.customerPhone : job.shopPhone)}"><button class="small secondary">📞 Call ${picked ? 'customer' : 'shop'}</button></a>
+      <span class="grow"></span>
+      ${picked ? `<button onclick="jobStep('delivered')">✓ Delivered</button>` : `<button onclick="jobStep('picked')">Picked up</button>`}
+    </div></div>`;
+  const pin = (e) => L.divIcon({ html: `<div style="font-size:26px;line-height:26px">${e}</div>`, className: '', iconSize: [26, 26], iconAnchor: [13, 13] });
+  jobMap = L.map('jobMap');
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }).addTo(jobMap);
+  const pts = [[job.pickup, '🏪'], [job.drop, '🏠'], [myLoc, '🛵']].filter(([p]) => p);
+  jobLayers = {};
+  for (const [p, e] of pts) jobLayers[e] = L.marker([p.lat, p.lng], { icon: pin(e) }).addTo(jobMap);
+  jobMap.fitBounds(pts.map(([p]) => [p.lat, p.lng]), { padding: [30, 30], maxZoom: 16 });
+}
+
+async function jobStep(step) {
+  const r = await call(`/api/partner/jobs/${currentJob.orderId}/${step}`, { body: {} });
+  toast(step === 'picked' ? 'Picked up. The customer can now track you live.' : `Delivered! You earned ${rupees(r.payout)}.`);
+  refresh();
+}
+
+async function loadJobs() {
+  const q = myLoc ? `?lat=${myLoc.lat}&lng=${myLoc.lng}` : '';
+  const jobs = await call('/api/partner/jobs' + q);
+  $('jobsBox').innerHTML = `<h3 style="margin-top:16px">Jobs near you</h3>` + (jobs.map((j) => `<div class="card">
+      <div class="row"><strong class="grow">${esc(j.shopName)}</strong><span class="stat" style="font-size:1.3rem">${rupees(j.payout)}</span></div>
+      <div class="muted">${j.toShopKm != null ? `${j.toShopKm} km to the shop · ` : ''}${j.tripKm != null ? `${j.tripKm} km trip` : ''} · ${j.items} items${j.collectCash ? ` · collect ${rupees(j.collectCash)} cash` : ''}</div>
+      <button class="block" style="margin-top:8px" onclick="acceptJob('${j.orderId}')">Accept job</button></div>`).join('')
+    || '<p class="muted">No jobs right now. New jobs show up here automatically.</p>');
+}
+async function acceptJob(id) {
+  try { await call(`/api/partner/jobs/${id}/accept`, { body: {} }); toast('Job is yours. Head to the shop.'); } finally { refresh(); }
+}
+
+async function loadHistory() {
+  const list = await call('/api/partner/earnings');
+  $('history').innerHTML = list.map((e) => `<div class="product"><div>${esc(e.shopName)}<div class="muted">${when(e.at)} · ${e.sharePct}% of ${rupees(e.deliveryFee)}${e.cash ? ` · cash collected ${rupees(e.cash)}` : ''}</div></div><strong>${rupees(e.earning)}</strong></div>`).join('')
+    || '<p class="muted">No deliveries yet.</p>';
+}
+
+// ---- live location: shared while online or on a job ----
+function startLocation() {
+  if (watchId !== null || !navigator.geolocation) return;
+  watchId = navigator.geolocation.watchPosition((p) => {
+    myLoc = { lat: p.coords.latitude, lng: p.coords.longitude };
+    jobLayers['🛵']?.setLatLng([myLoc.lat, myLoc.lng]);
+    if (currentJob?.riderKey && Date.now() - lastSent > 4000) {
+      lastSent = Date.now();
+      fetch(`/api/rider/${currentJob.orderId}/location`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key: currentJob.riderKey, ...myLoc }) });
+    }
+  }, () => toast('Allow location so shops and customers can see where you are'), { enableHighAccuracy: true, maximumAge: 5000 });
+}
+function stopLocation() { if (watchId !== null) navigator.geolocation.clearWatch(watchId); watchId = null; }
+
+init();
+setInterval(() => { if (me && !$('v-app').classList.contains('hidden')) refresh().catch(() => {}); }, 15000);
+</script>
+</body>
+</html>

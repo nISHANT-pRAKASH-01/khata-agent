@@ -16,6 +16,8 @@ const IST = 5.5 * 3600000;
 // Customers pay everything to the shop's UPI, so platform fees build up as the shop's "fees due".
 const PLATFORM_FEE = 14;
 const DELIVERY_FEE = 25;
+// Delivery partners keep a share of each ₹25 delivery fee: 50% on Basic (free), 85% on Pro (₹2,000/month).
+const PARTNER_PLANS = { basic: { price: 0, share: 0.5, label: 'Basic' }, pro: { price: 2000, share: 0.85, label: 'Pro (30 days)' } };
 const PLANS = { day: { price: 100, label: 'Day pass' }, premium: { price: 5000, label: 'Premium (30 days)' } };
 
 const id = () => crypto.randomUUID().slice(0, 8);
@@ -38,7 +40,7 @@ if (!db.products) {
   const fresh = seed({ id, endOfDayIST, istMidnight });
   for (const k of Object.keys(fresh)) db[k] = [...(db[k] || []), ...fresh[k]];
 }
-for (const k of ['assists', 'stockAdvice', 'purchases', 'stockCounts', 'coachTips']) db[k] ??= [];
+for (const k of ['assists', 'stockAdvice', 'purchases', 'stockCounts', 'coachTips', 'partners']) db[k] ??= [];
 const save = () => fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2));
 save();
 
@@ -71,8 +73,10 @@ const shopRevenue = (o) => (o.itemsTotal ?? o.total) + (o.deliveryFee || 0);
 
 // Platform fees owed by a shop: ₹14 per online order it confirmed, minus what it has already paid us.
 function feesFor(shopId) {
+  // ₹14 per confirmed online order, plus the ₹25 delivery fee when an Uncle Store partner delivered it
+  // (the customer paid that fee to the shop; we pay the partner their share).
   const charged = db.orders.filter((o) => o.shopId === shopId && o.platformFee && !['placed', 'cancelled'].includes(o.status))
-    .reduce((t, o) => t + o.platformFee, 0);
+    .reduce((t, o) => t + o.platformFee + (o.partner && o.status === 'completed' ? o.deliveryFee || 0 : 0), 0);
   const paid = db.payments.filter((p) => p.shopId === shopId && p.kind === 'fees' && ['claimed', 'paid'].includes(p.status))
     .reduce((t, p) => t + p.amount, 0);
   return { charged, paid, due: Math.max(0, charged - paid) };
@@ -190,6 +194,8 @@ function markPaid(p, source) {
   } else if (p.kind === 'plan') {
     const shop = db.shops.find((s) => s.id === p.shopId);
     if (shop && !p.planActivated) { p.planActivated = true; activatePlan(shop, p.refId); }
+  } else if (p.kind === 'partnerPlan') {
+    activatePartnerPlan(p);
   }
   save();
 }
@@ -208,9 +214,22 @@ function claimPaid(p, utr) {
   } else if (p.kind === 'plan') {
     const shop = db.shops.find((s) => s.id === p.shopId);
     if (shop && !p.planActivated) { p.planActivated = true; activatePlan(shop, p.refId); }
+  } else if (p.kind === 'partnerPlan') {
+    activatePartnerPlan(p);
   }
   save();
 }
+
+function activatePartnerPlan(p) {
+  const partner = db.partners.find((x) => x.id === p.refId);
+  if (!partner || p.planActivated) return;
+  p.planActivated = true;
+  const base = partnerPro(partner) ? Date.parse(partner.plan.validUntil) : Date.now();
+  partner.plan = { type: 'pro', validUntil: new Date(base + 30 * DAY).toISOString() };
+  log('partner', 'partner_plan_activated', { partnerId: partner.id, plan: partner.plan });
+}
+const partnerPro = (x) => x.plan?.type === 'pro' && Date.parse(x.plan.validUntil) > Date.now();
+const partnerShare = (x) => (partnerPro(x) ? PARTNER_PLANS.pro.share : PARTNER_PLANS.basic.share);
 
 const app = express();
 app.set('trust proxy', true);
@@ -220,7 +239,8 @@ const baseUrl = (req) => process.env.PUBLIC_URL?.replace(/\/$/, '') || `${req.pr
 
 app.get('/api/config', (req, res) => res.json({
   paymentsLive: pinelabs.isConfigured(), emailOn: mailer.isConfigured(),
-  googleClientId: process.env.GOOGLE_CLIENT_ID || null, demoMode: process.env.DEMO_MODE === '1', plans: PLANS, areas: allAreaCenters(),
+  googleClientId: process.env.GOOGLE_CLIENT_ID || null, demoMode: process.env.DEMO_MODE === '1', plans: PLANS, partnerPlans: PARTNER_PLANS,
+  deliveryFee: DELIVERY_FEE, areas: allAreaCenters(),
 }));
 
 // ---- Accounts: email + password, and "Sign in with Google" when GOOGLE_CLIENT_ID is set ----
@@ -258,6 +278,17 @@ function startSession(role, who, res) {
     save();
     return res.json({ shop: privateShop(shop), token: shop.token });
   }
+  if (role === 'partner') {
+    let x = db.partners.find((y) => y.email === who.email);
+    if (!x) {
+      x = { id: id(), name: who.name, email: who.email, passwordHash: who.passwordHash, passwordSalt: who.passwordSalt, plan: null, online: false, at: now() };
+      db.partners.push(x);
+      log('partner', 'signup', { partnerId: x.id, name: who.name });
+    }
+    x.token ??= token();
+    save();
+    return res.json({ partner: partnerView(x), token: x.token });
+  }
   let c = db.customers.find((x) => x.email === who.email);
   if (!c) {
     c = { id: id(), name: who.name, email: who.email, passwordHash: who.passwordHash, passwordSalt: who.passwordSalt, at: now() };
@@ -279,7 +310,7 @@ app.post('/api/auth/signup', (req, res) => {
   if (!EMAIL_RE.test(email)) fail(400, 'Enter a valid email');
   if (!name?.trim()) fail(400, 'Enter your name');
   if (typeof password !== 'string' || password.length < 6) fail(400, 'Password must be at least 6 characters');
-  const taken = role === 'owner' ? db.shops.some((s) => s.email === email) : db.customers.some((c) => c.email === email);
+  const taken = (role === 'owner' ? db.shops : role === 'partner' ? db.partners : db.customers).some((u) => u.email === email);
   if (taken) fail(409, 'An account with this email already exists. Sign in instead.');
   const { salt, hash } = hashPassword(password);
   startSession(role, { email, name: name.trim(), passwordHash: hash, passwordSalt: salt }, res);
@@ -287,7 +318,7 @@ app.post('/api/auth/signup', (req, res) => {
 
 app.post('/api/auth/login', (req, res) => {
   const email = String(req.body.email || '').trim().toLowerCase();
-  const user = req.body.role === 'owner' ? db.shops.find((s) => s.email === email) : db.customers.find((c) => c.email === email);
+  const user = (req.body.role === 'owner' ? db.shops : req.body.role === 'partner' ? db.partners : db.customers).find((u) => u.email === email);
   if (user && !user.passwordHash) fail(400, 'This account uses Google sign-in.');
   if (!passwordOk(user, req.body.password)) fail(401, 'Wrong email or password');
   startSession(req.body.role, { email, name: user.ownerName || user.name }, res);
@@ -514,7 +545,7 @@ app.get('/api/rider/:orderId', (req, res) => {
 app.post('/api/rider/:orderId/location', (req, res) => {
   const o = db.orders.find((x) => x.id === req.params.orderId);
   if (!o?.rider || o.rider.key !== req.body.key) fail(403, 'Invalid rider link');
-  if (o.status !== 'out_for_delivery') fail(400, 'This delivery is not active');
+  if (o.status !== 'out_for_delivery' && !(o.partner && o.status === 'packed')) fail(400, 'This delivery is not active');
   const lat = Number(req.body.lat), lng = Number(req.body.lng);
   if (!validPoint({ lat, lng })) fail(400, 'Bad location');
   Object.assign(o.rider, { lat, lng, at: now() });
@@ -527,6 +558,140 @@ app.post('/api/rider/:orderId/delivered', (req, res) => {
   if (!o?.rider || o.rider.key !== req.body.key) fail(403, 'Invalid rider link');
   if (o.status !== 'completed') setStatus(o, 'completed', 'rider', baseUrl(req));
   res.json({ status: o.status });
+});
+
+
+// ---- Delivery partners ----
+// Partners sign up, pick a plan, go online, and take delivery jobs that shops hand to Uncle Store.
+// First to accept gets the job; their share of the ₹25 delivery fee is fixed at that moment.
+const money = (n) => Math.round(n * 100) / 100;
+function partnerView(x) {
+  const mine = db.orders.filter((o) => o.partner?.id === x.id && o.status === 'completed');
+  const t = Date.now();
+  const sum = (list) => money(list.reduce((n, o) => n + o.partner.earning, 0));
+  const today = istDay(t);
+  return {
+    id: x.id, name: x.name, email: x.email, phone: x.phone || '', upiId: x.upiId || '', area: x.area || '', home: x.home || null,
+    plan: x.plan, pro: partnerPro(x), share: partnerShare(x), online: Boolean(x.online), profileDone: Boolean(x.phone && x.area),
+    earnings: {
+      today: sum(mine.filter((o) => istDay(o.completedAt || o.at) === today)),
+      week: sum(mine.filter((o) => t - Date.parse(o.completedAt || o.at) < 7 * DAY)),
+      total: sum(mine), deliveries: mine.length,
+    },
+  };
+}
+const partnerAuth = (req, res, next) => {
+  req.partner = db.partners.find((x) => x.token && x.token === req.get('x-partner-token'));
+  req.partner ? next() : res.status(401).json({ error: 'Please log in again' });
+};
+
+app.get('/api/partner/me', partnerAuth, (req, res) => {
+  const job = db.orders.find((o) => o.partner?.id === req.partner.id && ['packed', 'out_for_delivery'].includes(o.status));
+  res.json({ partner: partnerView(req.partner), job: job ? jobView(job, req.partner) : null });
+});
+
+app.patch('/api/partner/me', partnerAuth, (req, res) => {
+  const { name, phone, upiId, area, location } = req.body;
+  if (!/^\d{10}$/.test(phone || '')) fail(400, 'Enter a 10-digit phone number');
+  if (upiId && !/^[\w.\-]{2,64}@[a-zA-Z][\w]{1,32}$/.test(upiId)) fail(400, 'UPI ID looks wrong. It should look like name@okaxis');
+  if (!String(area || '').trim()) fail(400, 'Set your location');
+  if (location != null && !validPoint(location)) fail(400, 'Pick your location on the map');
+  Object.assign(req.partner, { name: String(name || req.partner.name).trim().slice(0, 60), phone, upiId: String(upiId || '').trim(), area: String(area).trim().slice(0, 60) });
+  if (location) req.partner.home = { lat: Number(location.lat), lng: Number(location.lng) };
+  req.partner.plan ??= { type: 'basic' };
+  save();
+  res.json(partnerView(req.partner));
+});
+
+// Basic is free and immediate; Pro is paid to Uncle Store's QR and starts once the UTR is entered.
+app.post('/api/partner/plan', partnerAuth, async (req, res) => {
+  const { plan } = req.body;
+  if (!PARTNER_PLANS[plan]) fail(400, 'Unknown plan');
+  if (plan === 'basic') {
+    if (partnerPro(req.partner)) fail(400, 'You are on Pro until it ends');
+    req.partner.plan = { type: 'basic' };
+    log('partner', 'partner_plan_activated', { partnerId: req.partner.id, plan: req.partner.plan });
+    return res.json({ partner: partnerView(req.partner) });
+  }
+  const p = await createPayment({ kind: 'partnerPlan', refId: req.partner.id, amount: PARTNER_PLANS.pro.price, description: `Uncle Store Pro for ${req.partner.name}`, customerName: req.partner.name, customerPhone: req.partner.phone });
+  res.json({ paymentLink: p.link });
+});
+
+app.post('/api/partner/online', partnerAuth, (req, res) => {
+  if (!req.partner.phone) fail(400, 'Finish your profile first');
+  req.partner.online = Boolean(req.body.online);
+  if (validPoint(req.body.location)) req.partner.lastLocation = { lat: req.body.location.lat, lng: req.body.location.lng, at: now() };
+  log('partner', req.partner.online ? 'went_online' : 'went_offline', { partnerId: req.partner.id });
+  res.json(partnerView(req.partner));
+});
+
+function jobView(o, partner, from) {
+  const shop = shopOf(o);
+  const pickup = { lat: shop.lat, lng: shop.lng };
+  return {
+    orderId: o.id, status: o.status, shopName: shop.shopName, shopPhone: shop.phone, shopArea: shop.area, pickup,
+    drop: o.location, address: o.address, customerName: o.customerName, customerPhone: o.customerPhone,
+    items: o.items.reduce((n, l) => n + l.qty, 0), deliveryFee: o.deliveryFee,
+    payout: o.partner?.earning ?? money((o.deliveryFee || 0) * partnerShare(partner)),
+    collectCash: o.paymentMethod === 'pay_at_shop' && o.paymentStatus !== 'paid' ? o.total : 0,
+    toShopKm: from ? distanceFrom(from, shop) : null,
+    tripKm: o.location ? Math.round(km(pickup, o.location) * 10) / 10 : null,
+    riderKey: o.partner?.id === partner.id ? o.rider?.key : undefined,
+  };
+}
+
+// Open jobs: packed delivery orders whose shop asked for an Uncle Store rider, nearest shop first.
+app.get('/api/partner/jobs', partnerAuth, (req, res) => {
+  const live = { lat: Number(req.query.lat), lng: Number(req.query.lng) };
+  const from = validPoint(live) ? live : req.partner.lastLocation || req.partner.home || areaCenter(req.partner.area);
+  const jobs = db.orders.filter((o) => o.riderRequest === 'open' && o.status === 'packed' && !o.rider)
+    .map((o) => jobView(o, req.partner, from))
+    .filter((j) => j.toShopKm === null || j.toShopKm <= 15)
+    .sort((a, b) => (a.toShopKm ?? 99) - (b.toShopKm ?? 99));
+  res.json(jobs);
+});
+
+app.post('/api/partner/jobs/:id/accept', partnerAuth, (req, res) => {
+  const x = req.partner;
+  if (!x.phone) fail(400, 'Finish your profile first');
+  if (db.orders.some((o) => o.partner?.id === x.id && ['packed', 'out_for_delivery'].includes(o.status))) fail(409, 'Finish your current delivery first');
+  const o = db.orders.find((y) => y.id === req.params.id);
+  if (!o || o.riderRequest !== 'open' || o.status !== 'packed' || o.rider) fail(409, 'Someone else took this job');
+  const share = partnerShare(x);
+  const shop = shopOf(o);
+  o.riderRequest = 'accepted';
+  o.partner = { id: x.id, sharePct: Math.round(share * 100), earning: money((o.deliveryFee || 0) * share), plan: partnerPro(x) ? 'pro' : 'basic' };
+  o.rider = { name: x.name, phone: x.phone, key: token(), lat: x.lastLocation?.lat ?? shop.lat, lng: x.lastLocation?.lng ?? shop.lng, at: now(), partnerId: x.id };
+  log('partner', 'job_accepted', { partnerId: x.id, orderId: o.id, earning: o.partner.earning });
+  res.json(jobView(o, x));
+});
+
+const ownJob = (req) => {
+  const o = db.orders.find((y) => y.id === req.params.id && y.partner?.id === req.partner.id);
+  if (!o) fail(404, 'Not your delivery');
+  return o;
+};
+
+app.post('/api/partner/jobs/:id/picked', partnerAuth, (req, res) => {
+  const o = ownJob(req);
+  if (o.status === 'packed') setStatus(o, 'out_for_delivery', 'partner', baseUrl(req));
+  res.json(jobView(o, req.partner));
+});
+
+app.post('/api/partner/jobs/:id/delivered', partnerAuth, (req, res) => {
+  const o = ownJob(req);
+  if (o.status !== 'out_for_delivery') fail(400, 'Mark it picked up first');
+  if (o.paymentMethod === 'pay_at_shop' && o.paymentStatus !== 'paid') o.cashWithPartner = o.total;
+  o.completedAt = now();
+  setStatus(o, 'completed', 'partner', baseUrl(req));
+  log('partner', 'job_delivered', { partnerId: req.partner.id, orderId: o.id, earning: o.partner.earning });
+  res.json({ ...jobView(o, req.partner), partner: partnerView(req.partner) });
+});
+
+app.get('/api/partner/earnings', partnerAuth, (req, res) => {
+  res.json(db.orders.filter((o) => o.partner?.id === req.partner.id && o.status === 'completed')
+    .sort((a, b) => (b.completedAt || b.at).localeCompare(a.completedAt || a.at)).slice(0, 50)
+    .map((o) => ({ orderId: o.id, at: o.completedAt || o.at, shopName: shopOf(o)?.shopName, deliveryFee: o.deliveryFee, sharePct: o.partner.sharePct, earning: o.partner.earning, cash: o.cashWithPartner || 0 })));
 });
 
 // ---- Shop owner side ----
@@ -593,6 +758,16 @@ app.patch('/api/owner/shop', ownerAuth, (req, res) => {
   res.json(privateShop(req.shop));
 });
 
+// Shop asks Uncle Store for a delivery partner for a packed delivery order (or withdraws the request).
+app.post('/api/owner/orders/:id/request-rider', ownerAuth, (req, res) => {
+  const o = db.orders.find((x) => x.id === req.params.id && x.shopId === req.shop.id);
+  if (!o || o.fulfilment !== 'delivery' || o.status !== 'packed') fail(400, 'Only packed delivery orders can get a rider');
+  if (o.rider) fail(409, 'A rider is already assigned');
+  o.riderRequest = req.body.cancel ? null : 'open';
+  log('shopkeeper', req.body.cancel ? 'rider_request_cancelled' : 'rider_requested', { orderId: o.id });
+  res.json(o);
+});
+
 app.get('/api/owner/me', ownerAuth, (req, res) => {
   const mine = db.orders.filter((o) => o.shopId === req.shop.id);
   res.json({
@@ -648,8 +823,10 @@ app.post('/api/owner/orders/:id/status', ownerAuth, async (req, res) => {
       o.paymentId = p.id;
     }
   }
+  if (status === 'out_for_delivery' && o.partner) fail(409, 'An Uncle Store rider has this order. They mark it picked up from their app.');
   if (status === 'out_for_delivery') {
     if (!rider?.name || !/^\d{10}$/.test(rider.phone || '')) fail(400, 'Enter the delivery partner\'s name and 10-digit phone');
+    o.riderRequest = null;
     o.rider = { name: rider.name, phone: rider.phone, key: token(), lat: req.shop.lat, lng: req.shop.lng, at: now() };
   }
   setStatus(o, status, 'shopkeeper', baseUrl(req));

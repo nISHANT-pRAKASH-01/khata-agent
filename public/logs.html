@@ -23,7 +23,7 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<'
 fetch('/api/logs').then((r) => r.json()).then((logs) => {
   const count = (a) => logs.filter((l) => l.action === a).length;
   document.getElementById('stats').textContent =
-    `Shop signups: ${logs.filter((l) => l.action === 'signup' && l.actor === 'shopkeeper').length} · Customer signups: ${logs.filter((l) => l.action === 'signup' && l.actor === 'customer').length} · Orders: ${count('order_placed')} · Counter bills: ${count('walk_in_bill')} · Plans bought: ${count('plan_activated')} · Payments: ${count('payment_received')}`;
+    `Shop signups: ${logs.filter((l) => l.action === 'signup' && l.actor === 'shopkeeper').length} · Customer signups: ${logs.filter((l) => l.action === 'signup' && l.actor === 'customer').length} · Delivery partners: ${logs.filter((l) => l.action === 'signup' && l.actor === 'partner').length} · Orders: ${count('order_placed')} · Partner deliveries: ${count('job_delivered')} · Counter bills: ${count('walk_in_bill')} · Plans bought: ${count('plan_activated')} · Payments: ${count('payment_received')}`;
   document.getElementById('rows').innerHTML = logs.map((l) =>
     `<tr><td>${new Date(l.at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}</td><td>${esc(l.actor)}</td><td>${esc(l.action)}</td><td><code>${esc(JSON.stringify(l.details))}</code></td></tr>`).join('');
 });

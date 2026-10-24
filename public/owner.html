@@ -289,7 +289,7 @@ const STATUS_TEXT = { placed: 'needs your confirmation', confirmed: 'confirmed',
 const ACTIONS = {
   placed: (o) => [['confirmed', 'Confirm order'], ['cancelled', 'Reject']],
   confirmed: () => [['packed', 'Mark packed'], ['cancelled', 'Cancel']],
-  packed: (o) => o.fulfilment === 'delivery' ? [['out_for_delivery', 'Send with rider']] : [['completed', 'Customer picked up']],
+  packed: (o) => o.fulfilment === 'delivery' ? (o.partner || o.riderRequest === 'open' ? [] : [['out_for_delivery', 'Send with my own rider']]) : [['completed', 'Customer picked up']],
   out_for_delivery: () => [['completed', 'Delivered']],
 };
 // What the customer would want to hear at each step, ready to send on WhatsApp.
@@ -313,16 +313,28 @@ async function loadOrders() {
         <span class="badge ${o.status}">${STATUS_TEXT[o.status]}</span></div>
       <div class="muted">${when(o.at)} · #${o.id}${o.address ? ' · ' + esc(o.address) : ''}</div>
       <div style="margin:6px 0">${o.items.map((l) => `${esc(l.name)} × ${l.qty}`).join(' · ')}</div>
-      ${o.platformFee ? `<div class="muted">Items ${rupees(o.itemsTotal)}${o.deliveryFee ? ` + your delivery fee ${rupees(o.deliveryFee)}` : ''} + platform fee ${rupees(o.platformFee)} (owed to Uncle Store)</div>` : ''}
+      ${o.platformFee ? `<div class="muted">Items ${rupees(o.itemsTotal)}${o.deliveryFee ? ` + delivery ${rupees(o.deliveryFee)}${o.partner ? ' (Uncle Store rider)' : ''}` : ''} + platform fee ${rupees(o.platformFee)} (owed to Uncle Store)</div>` : ''}
       ${o.rider ? `<div class="muted">Rider: ${esc(o.rider.name)} (${esc(o.rider.phone)}) ·
         <a href="${esc(waUrl(o.rider.phone, `Delivery for ${me.shopName}, order #${o.id}. Open this and keep it open while riding: ${location.origin}${o.rider.link}`))}" target="_blank">send rider link</a> ·
         <a href="${esc(o.rider.link)}" target="_blank">open rider page</a></div>` : ''}
-      ${o.status === 'packed' && o.fulfilment === 'delivery' ? `<div class="row"><input id="rn-${o.id}" class="grow" placeholder="Rider name"><input id="rp-${o.id}" class="grow" placeholder="Rider phone" inputmode="numeric" maxlength="10"></div>` : ''}
+      ${o.status === 'packed' && o.fulfilment === 'delivery' ? riderBox(o) : ''}
       <div class="row" style="margin-top:6px"><strong class="grow">${rupees(o.total)} <span class="badge ${o.paymentStatus}">${payBadge(o)}</span></strong>
         ${['claimed', 'pending'].includes(o.paymentStatus) && o.status !== 'cancelled' && o.status !== 'placed' ? `<button class="small secondary" onclick="paymentReceived('${o.id}')">Money received</button>` : ''}
         ${o.customerPhone && waText(o) ? `<a href="${esc(waUrl(o.customerPhone, waText(o)))}" target="_blank"><button class="small secondary">WhatsApp update</button></a>` : ''}
         ${(ACTIONS[o.status]?.(o) || []).map(([st, t]) => `<button class="small ${st === 'cancelled' ? 'secondary' : ''}" onclick="setStatus('${o.id}','${st}')">${t}</button>`).join('')}</div>
     </div>`).join('') || '<p class="muted">No open orders right now. New orders show up here automatically, and you get an email.</p>';
+}
+// A packed delivery order: hand it to an Uncle Store rider, or send it with the shop's own rider.
+function riderBox(o) {
+  if (o.partner) return `<div class="card" style="margin:6px 0;background:var(--info-soft)">🛵 <strong>${esc(o.rider.name)}</strong> (Uncle Store rider) accepted and is coming to pick it up · <a href="tel:${esc(o.rider.phone)}">${esc(o.rider.phone)}</a></div>`;
+  if (o.riderRequest === 'open') return `<div class="row" style="margin:6px 0"><span class="grow">⏳ Looking for an Uncle Store rider near you…</span><button class="small secondary" onclick="requestRider('${o.id}', true)">Cancel request</button></div>`;
+  return `<div class="row" style="margin:6px 0"><button class="small" onclick="requestRider('${o.id}')">🛵 Get an Uncle Store rider</button><span class="muted">or use your own:</span></div>
+    <div class="row"><input id="rn-${o.id}" class="grow" placeholder="Your rider's name"><input id="rp-${o.id}" class="grow" placeholder="Rider phone" inputmode="numeric" maxlength="10"></div>`;
+}
+async function requestRider(id, cancel) {
+  await call(`/api/owner/orders/${id}/request-rider`, { body: { cancel: Boolean(cancel) } });
+  toast(cancel ? 'Request cancelled' : 'Nearby Uncle Store riders can now accept this delivery');
+  loadOrders();
 }
 async function setStatus(id, status) {
   if (status === 'cancelled' && !confirm('Cancel this order? Stock will be put back.')) return;
@@ -683,7 +695,7 @@ let feesNow = { charged: 0, paid: 0, due: 0 }, qrData;
 function loadPlanTab() {
   $('tabPlans').innerHTML = planCards('tab');
   $('feesCard').innerHTML = `<div class="row"><div class="grow"><h3 style="margin:0">Platform fees</h3>
-      <div class="muted">₹14 per online order you confirm. Charged so far ${rupees(feesNow.charged)}, paid ${rupees(feesNow.paid)}.</div></div>
+      <div class="muted">₹14 per online order you confirm, plus the ₹25 delivery fee when an Uncle Store rider delivers. Charged so far ${rupees(feesNow.charged)}, paid ${rupees(feesNow.paid)}.</div></div>
       <div style="text-align:right"><div class="stat">${rupees(feesNow.due)}</div><div class="muted">due</div></div></div>
     ${feesNow.due ? '<button class="small" style="margin-top:8px" onclick="payFees()">Pay to Uncle Store</button>' : ''}`;
   $('setUpi').value = me.upiId; $('setPayee').value = me.payeeName || me.ownerName || '';

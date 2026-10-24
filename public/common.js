@@ -1,7 +1,7 @@
 // Shared helpers for every page.
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const rupees = (n) => '₹' + Number(n || 0).toLocaleString('en-IN');
+const rupees = (n) => '₹' + Number(n || 0).toLocaleString('en-IN', Number.isInteger(Number(n || 0)) ? {} : { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const when = (iso) => new Date(iso).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
 const label = (s) => String(s || '').replace(/_/g, ' ');
 
