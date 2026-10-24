@@ -19,7 +19,7 @@
       <h2>Shop owner sign in</h2>
       <p class="muted">Use the email where you want new-order alerts. New here? Choose "Create account".</p>
       <div id="signin"></div>
-      <details style="margin-top:16px"><summary class="muted">Try a demo shop</summary>
+      <details style="margin-top:16px" id="demoBox" class="hidden"><summary class="muted">Try a demo shop (testing only)</summary>
         <label>Demo shop phone</label><input id="liPhone" inputmode="numeric" maxlength="10" value="9810000001">
         <label>PIN</label><input id="liPin" type="password" inputmode="numeric" maxlength="4" value="1234">
         <button class="block secondary" style="margin-top:8px" onclick="demoLogin()">Open demo shop</button>
@@ -271,6 +271,7 @@ async function showAuth() {
   $('areas').innerHTML = areas.map((a) => `<option value="${esc(a)}">`).join('');
   $('signin').innerHTML = '';
   mountSignIn($('signin'), 'owner', onSignedIn);
+  api('/api/config').then((cfg) => $('demoBox').classList.toggle('hidden', !cfg.demoMode));
 }
 
 async function start() {

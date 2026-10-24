@@ -215,7 +215,7 @@ const baseUrl = (req) => process.env.PUBLIC_URL?.replace(/\/$/, '') || `${req.pr
 
 app.get('/api/config', (req, res) => res.json({
   paymentsLive: pinelabs.isConfigured(), emailOn: mailer.isConfigured(),
-  googleClientId: process.env.GOOGLE_CLIENT_ID || null, plans: PLANS, areas: AREA_CENTERS,
+  googleClientId: process.env.GOOGLE_CLIENT_ID || null, demoMode: process.env.DEMO_MODE === '1', plans: PLANS, areas: AREA_CENTERS,
 }));
 
 // ---- Accounts: email + password, and "Sign in with Google" when GOOGLE_CLIENT_ID is set ----
@@ -471,7 +471,10 @@ app.post('/api/owner/signup', (req, res) => {
 });
 
 // Phone + PIN only works for the seeded demo shops; real owners sign in with their account.
+// Testing shortcut into the seeded sample shops. Only on when DEMO_MODE=1 (local), never on the live site.
+const demoMode = process.env.DEMO_MODE === '1';
 app.post('/api/owner/demo-login', (req, res) => {
+  if (!demoMode) fail(404, 'Not found');
   const shop = db.shops.find((s) => s.mock && s.phone === req.body.phone && s.pin === req.body.pin);
   if (!shop) fail(401, 'Wrong demo phone or PIN');
   shop.token ??= token();
