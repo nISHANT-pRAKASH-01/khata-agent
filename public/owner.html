@@ -29,6 +29,7 @@
       </details>
     </div>
     <div class="card hidden" style="max-width:520px;margin:24px auto" id="registerCard">
+      <p class="muted" style="margin:0">Step 1 of 2</p>
       <h2>Register your shop</h2>
       <p class="muted" id="regWho"></p>
       <label>Shop name</label><input id="suShop">
@@ -41,34 +42,22 @@
       <button class="block" style="margin-top:12px" onclick="signup()">Register shop</button>
     </div>
 
-    <div style="max-width:880px;margin:8px auto 24px">
+    <div style="max-width:880px;margin:8px auto 24px" id="authPlansBox">
       <h2 style="text-align:center">Put your shop online</h2>
-      <p class="muted" style="text-align:center">Create your account above, then pick a plan to go live. Every plan includes inventory, billing and the AI inventory coach.</p>
-      <div class="grid two">
-        <div class="card plan">
-          <h3>Day pass</h3>
-          <div class="price">₹100 <span class="muted">/ day</span></div>
-          <ul class="muted">
-            <li>Listed in your area until midnight</li>
-            <li>Customers order ahead; you confirm and pack, they walk in and pick up</li>
-            <li>Inventory, billing and the AI inventory coach</li>
-          </ul>
-        </div>
-        <div class="card plan best">
-          <h3>Premium <span class="badge premium">Most reach</span></h3>
-          <div class="price">₹5,000 <span class="muted">/ month</span></div>
-          <ul class="muted">
-            <li>Featured at the top in <strong>every</strong> area</li>
-            <li>Home delivery with live rider tracking</li>
-            <li>Insights and the AI stock advisor: what sells in your area and what to stock more of</li>
-          </ul>
-        </div>
-      </div>
+      <p class="muted" style="text-align:center">Every plan includes inventory, billing and the AI inventory coach.</p>
+      <div class="grid two" id="authPlans"></div>
     </div>
   </section>
 
   <!-- Dashboard -->
   <section id="v-app" class="hidden">
+    <div id="onboard" class="hidden" style="max-width:880px;margin:16px auto">
+      <p class="muted" style="margin:0">Step 2 of 2</p>
+      <h2>Choose a plan to go live</h2>
+      <p class="muted">Pay with any UPI app. Your shop goes live as soon as you enter the payment reference, and then you can add products and take orders.</p>
+      <div class="grid two" id="onboardPlans"></div>
+    </div>
+    <div id="dashboard">
     <div class="card" id="planBanner"></div>
     <nav class="tabs" id="tabs">
       <button data-tab="orders">Orders<span class="count hidden" id="cOrders"></span></button>
@@ -179,26 +168,14 @@
     <div id="t-insights" class="tab"><div id="insights"></div></div>
 
     <div id="t-plan" class="tab">
-      <div class="card" style="margin-top:12px">
+      <div class="grid two" style="margin-top:12px" id="tabPlans"></div>
+      <div class="card">
         <h3>📍 Shop location</h3>
         <p class="muted">Customers see how far you are and get directions from this pin. Search, use GPS, or drag the pin.</p>
         <div id="editPicker"></div>
         <button style="margin-top:8px" onclick="saveLocation()">Save location</button>
       </div>
-      <div class="grid two">
-        <div class="card plan">
-          <h3>Day pass</h3>
-          <div class="price">₹100 <span class="muted">/ day</span></div>
-          <ul class="muted"><li>Listed in your area until midnight</li><li>Pickup orders: customers order, you confirm and pack, they walk in</li><li>Inventory, billing and the AI inventory coach</li></ul>
-          <button class="block" id="buyDay" onclick="buyPlan('day')">Go live today for ₹100</button>
-        </div>
-        <div class="card plan best">
-          <h3>Premium <span class="badge premium">Most reach</span></h3>
-          <div class="price">₹5,000 <span class="muted">/ month</span></div>
-          <ul class="muted"><li>Featured at the top in every area</li><li>Home delivery orders</li><li>Insights: top sellers, sales trend, repeat customers, shop views, restock advice</li></ul>
-          <button class="block" onclick="buyPlan('premium')">Get Premium for ₹5,000</button>
-        </div>
-      </div>
+    </div>
     </div>
   </section>
 </main>
@@ -218,6 +195,7 @@ function onSignedIn(r) {
     ticket = r.ticket;
     $('regWho').textContent = `Signed in as ${r.name} (${r.email})`;
     $('signinCard').classList.add('hidden'); $('registerCard').classList.remove('hidden');
+    $('authPlansBox').classList.add('hidden');
     shopPicker = locationPicker($('suPicker'));
     return;
   }
@@ -234,13 +212,15 @@ async function signup() {
     ticket, shopName: $('suShop').value.trim(), area: where.area,
     category: $('suCat').value, phone: $('suPhone').value.trim(), location: where.location,
   } });
-  token = r.token; store.set('ownerToken', token); tab = 'plan'; start();
+  token = r.token; store.set('ownerToken', token); tab = 'inventory'; start();
 }
 function logout() { store.set('ownerToken', null); token = me = null; showAuth(); }
 
 async function showAuth() {
   $('v-auth').classList.remove('hidden'); $('v-app').classList.add('hidden');
   $('signinCard').classList.remove('hidden'); $('registerCard').classList.add('hidden');
+  $('authPlansBox').classList.remove('hidden');
+  $('authPlans').innerHTML = planCards('auth');
   $('who').textContent = ''; $('logoutBtn').classList.add('hidden');
   $('signin').innerHTML = '';
   mountSignIn($('signin'), 'owner', onSignedIn);
@@ -252,12 +232,18 @@ async function start() {
   await refreshMe();
   $('v-auth').classList.add('hidden'); $('v-app').classList.remove('hidden');
   $('logoutBtn').classList.remove('hidden');
-  setTab(tab);
+  if (me.plan) setTab(tab);
 }
 
 async function refreshMe() {
   const r = await call('/api/owner/me');
   me = r.shop;
+  // A new shop sees only the plan step; the dashboard opens once it has taken a plan.
+  // (A shop whose plan has expired keeps its dashboard, with a "not live" banner to renew.)
+  const onboarding = !me.plan;
+  $('onboard').classList.toggle('hidden', !onboarding);
+  $('dashboard').classList.toggle('hidden', onboarding);
+  if (onboarding) { $('onboardPlans').innerHTML = planCards('onboard'); $('who').textContent = me.shopName; return; }
   $('who').textContent = me.shopName;
   $('cOrders').textContent = r.toConfirm || r.openOrders; $('cOrders').classList.toggle('hidden', !r.openOrders);
   $('cLow').textContent = r.lowStock; $('cLow').classList.toggle('hidden', !r.lowStock);
@@ -270,7 +256,6 @@ async function refreshMe() {
         ${me.premium ? '' : '<button class="small secondary" onclick="setTab(\'plan\')">Upgrade</button>'}</div>`
     : `<div class="row"><div class="grow"><strong>${esc(me.shopName)}</strong> is <span class="badge cancelled">not live</span>. Customers can't see you today.</div>
         <button class="small" onclick="setTab('plan')">Go live for ₹100</button></div>`;
-  $('buyDay').disabled = me.premium;
 }
 
 function setTab(t) {
@@ -647,8 +632,37 @@ async function askCoach() {
 }
 
 // ---- plans ----
+const PLAN_INFO = {
+  day: { title: 'Day pass', price: '₹100', per: '/ day', cta: 'Go live today for ₹100',
+    points: ['Listed in your area until midnight', 'Customers order ahead; you confirm and pack, they walk in and pick up', 'Inventory, billing and the AI inventory coach'] },
+  premium: { title: 'Premium <span class="badge premium">Most reach</span>', price: '₹5,000', per: '/ month', cta: 'Get Premium for ₹5,000',
+    points: ['Featured at the top in <strong>every</strong> area', 'Home delivery with live rider tracking', 'Insights and the AI stock advisor: what sells in your area and what to stock more of'] },
+};
+// mode 'auth' = not signed in yet (button leads to Create account); otherwise the button pays.
+function planCards(mode) {
+  const chosen = store.get('ownerPlanChoice');
+  return Object.entries(PLAN_INFO).map(([key, p]) => {
+    const current = mode !== 'auth' && me?.planActive && me.plan.type === key;
+    const disabled = current || (mode !== 'auth' && key === 'day' && me?.premium);
+    const until = current && new Date(me.plan.validUntil).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
+    return `<div class="card plan ${key === 'premium' ? 'best' : ''}" ${mode === 'onboard' && chosen === key ? 'style="border-color:var(--brand)"' : ''}>
+      <h3>${p.title}</h3><div class="price">${p.price} <span class="muted">${p.per}</span></div>
+      <ul class="muted">${p.points.map((x) => `<li>${x}</li>`).join('')}</ul>
+      <button class="block ${key === 'day' ? '' : 'secondary'}" ${disabled ? 'disabled' : ''} onclick="${mode === 'auth' ? `choosePlanFirst('${key}')` : `buyPlan('${key}')`}">${mode === 'auth' ? `Start with ${key === 'day' ? 'a Day pass' : 'Premium'}` : current ? `✓ Your plan · active until ${until}` : disabled ? 'Included in Premium' : p.cta}</button>
+      ${current && key === 'premium' ? `<button class="block secondary" style="margin-top:6px" onclick="buyPlan('premium')">Extend by 30 days for ₹5,000</button>` : ''}
+    </div>`;
+  }).join('');
+}
+function choosePlanFirst(key) {
+  store.set('ownerPlanChoice', key);
+  document.querySelector('#signin [data-m="signup"]')?.click();
+  scrollTo({ top: 0, behavior: 'smooth' });
+  toast('Create your account first. You\'ll pay for the plan right after.');
+}
 let editPicker = null;
-function loadPlanTab() { editPicker = locationPicker($('editPicker'), { initial: { lat: me.lat, lng: me.lng }, area: me.area }); }
+function loadPlanTab() {
+  $('tabPlans').innerHTML = planCards('tab');
+  editPicker = locationPicker($('editPicker'), { initial: { lat: me.lat, lng: me.lng }, area: me.area }); }
 async function saveLocation() {
   const where = editPicker.value();
   if (!where.location) return toast('Pick your shop location first');
@@ -656,6 +670,7 @@ async function saveLocation() {
   toast('Location saved'); refreshMe();
 }
 async function buyPlan(plan) {
+  store.set('ownerPlanChoice', null);
   const r = await call('/api/owner/plan', { body: { plan } });
   openPayment(r.paymentLink);
 }

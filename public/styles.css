@@ -21,7 +21,7 @@ h1 { font-size: 1.6rem; margin: 8px 0 4px; } h2 { font-size: 1.15rem; margin: 0 
 .muted { color: var(--muted); font-size: .9rem; }
 .hidden { display: none !important; }
 
-header.top { position: sticky; top: 0; z-index: 5; background: var(--card); border-bottom: 1px solid var(--line); }
+header.top { position: sticky; top: 0; z-index: 1100; background: var(--card); border-bottom: 1px solid var(--line); }
 header.top .bar { max-width: 960px; margin: 0 auto; padding: 10px 16px; display: flex; align-items: center; gap: 12px; }
 header.top .logo { font-weight: 800; text-decoration: none; color: var(--text); font-size: 1.1rem; }
 header.top .logo span { color: var(--brand); }
@@ -88,3 +88,6 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .hbar i { display: block; height: 100%; background: var(--brand); }
 
 #toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 10px; font-size: .9rem; z-index: 50; max-width: calc(100% - 32px); }
+
+/* Keep Leaflet's internal layers inside the map so they never cover buttons or the header. */
+.leaflet-container { position: relative; z-index: 0; }

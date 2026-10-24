@@ -319,7 +319,8 @@ app.get('/api/geo/search', async (req, res) => {
   const q = String(req.query.q || '').trim().slice(0, 120);
   if (q.length < 3) return res.json([]);
   const data = await nominatim(`search?format=jsonv2&addressdetails=1&limit=6&countrycodes=in&q=${encodeURIComponent(q)}`);
-  res.json(data.map(placeOf));
+  // Areas (suburbs, neighbourhoods) before landmarks like stations, so the area name comes out right.
+  res.json([...data].sort((a, b) => AREA_TYPES.includes(b.addresstype) - AREA_TYPES.includes(a.addresstype)).map(placeOf));
 });
 
 app.get('/api/geo/reverse', async (req, res) => {
