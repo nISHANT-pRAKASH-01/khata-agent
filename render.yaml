@@ -1,0 +1,42 @@
+# Render Blueprint: Dashboard → New → Blueprint → pick this repo.
+services:
+  - type: web
+    name: uncle-store
+    runtime: node
+    plan: starter # Free plans sleep and lose the data file; Starter + disk keeps signups and orders
+    region: singapore
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /api/config
+    disk:
+      name: data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: DATA_FILE
+        value: /data/data.json
+      - key: AGENT_API_KEY # token AgenticOrg uses to call /mcp
+        generateValue: true
+      - key: AGENTICORG_BASE_URL
+        value: https://agenticorg.hackathon.pinelabs.com
+      # Filled in on the Render dashboard (prompted when the Blueprint is created; can be left blank).
+      - key: AGENTICORG_API_KEY
+        sync: false
+      - key: AGENTICORG_AGENT_ID
+        sync: false
+      - key: AGENTICORG_SHOPPER_AGENT_ID
+        sync: false
+      - key: AGENTICORG_DEMAND_AGENT_ID
+        sync: false
+      - key: AGENTICORG_COACH_AGENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GMAIL_USER
+        sync: false
+      - key: GMAIL_APP_PASSWORD
+        sync: false
+      - key: PUBLIC_URL
+        sync: false
