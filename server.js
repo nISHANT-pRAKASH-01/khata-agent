@@ -7,7 +7,8 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { z } from 'zod';
 import * as pinelabs from './pinelabs.js';
 import * as agenticorg from './agenticorg.js';
-import { seed } from './seed.js';
+import * as mailer from './mailer.js';
+import { seed, AREA_CENTERS } from './seed.js';
 
 const DAY = 86400000;
 const IST = 5.5 * 3600000;
@@ -17,13 +18,15 @@ const id = () => crypto.randomUUID().slice(0, 8);
 const token = () => crypto.randomBytes(16).toString('hex');
 const now = () => new Date().toISOString();
 const istDay = (t) => new Date(new Date(t).getTime() + IST).toISOString().slice(0, 10);
-const endOfDayIST = (d) => new Date(Date.parse(`${istDay(d)}T23:59:59.999Z`) - IST);
+const istMidnight = (t) => Date.parse(`${istDay(t)}T00:00:00Z`) - IST;
+const istHour = (t) => new Date(new Date(t).getTime() + IST).getUTCHours();
+const endOfDayIST = (d) => new Date(istMidnight(d) + DAY - 1);
 
 const DATA_FILE = process.env.DATA_FILE || 'data.json';
-const db = fs.existsSync(DATA_FILE) ? JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')) : seed({ id, endOfDayIST });
+const db = fs.existsSync(DATA_FILE) ? JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')) : seed({ id, endOfDayIST, istMidnight });
 // Older data files (khata-only) predate the marketplace: add the mock marketplace alongside.
 if (!db.products) {
-  const fresh = seed({ id, endOfDayIST });
+  const fresh = seed({ id, endOfDayIST, istMidnight });
   for (const k of Object.keys(fresh)) db[k] = [...(db[k] || []), ...fresh[k]];
 }
 const save = () => fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2));
@@ -43,10 +46,12 @@ const fail = (status, message) => { throw new HttpError(status, message); };
 const planActive = (shop) => Boolean(shop.plan && new Date(shop.plan.validUntil) > new Date());
 const isPremium = (shop) => planActive(shop) && shop.plan.type === 'premium';
 const publicShop = (s) => ({
-  id: s.id, shopName: s.shopName, ownerName: s.ownerName, area: s.area, category: s.category,
+  id: s.id, shopName: s.shopName, ownerName: s.ownerName, area: s.area, category: s.category, lat: s.lat, lng: s.lng,
   premium: isPremium(s), delivery: isPremium(s), open: planActive(s),
 });
-const privateShop = (s) => ({ ...publicShop(s), phone: s.phone, plan: s.plan, planActive: planActive(s) });
+const privateShop = (s) => ({ ...publicShop(s), phone: s.phone, email: s.email, plan: s.plan, planActive: planActive(s) });
+const shopOf = (o) => db.shops.find((s) => s.id === o.shopId);
+const validPoint = (p) => p && Number.isFinite(p.lat) && Number.isFinite(p.lng) && Math.abs(p.lat) <= 90 && Math.abs(p.lng) <= 180;
 
 function balances(shopId) {
   const map = {};
@@ -64,6 +69,36 @@ function addKhata(shopId, { customerName, customerPhone, amount, type, note }) {
   db.entries.push(entry);
   log('shopkeeper', `khata_${type}`, entry);
   return entry;
+}
+
+// ---- Email (fire-and-forget; never blocks or fails an order) ----
+function notify(to, subject, text) {
+  if (!to) return;
+  if (!mailer.isConfigured()) return log('system', 'email_skipped', { subject, reason: 'Gmail not configured' });
+  mailer.sendMail({ to, subject, text })
+    .then(() => log('system', 'email_sent', { subject }))
+    .catch((err) => log('system', 'email_failed', { subject, error: err.message }));
+}
+
+const itemsText = (o) => o.items.map((l) => `  • ${l.name} × ${l.qty} = ₹${l.price * l.qty}`).join('\n') + `\n  Total: ₹${o.total}`;
+
+function emailForStatus(o, base) {
+  const shop = shopOf(o);
+  const ordersUrl = `${base}/customer.html?orders=1`;
+  const msg = {
+    placed: [`Order sent to ${shop.shopName}`, `We've sent your order to ${shop.shopName}. You'll get an email as soon as they confirm it.\n\n${itemsText(o)}\n\nTrack it: ${ordersUrl}`],
+    confirmed: [`${shop.shopName} confirmed your order`, `Good news! ${shop.shopName} confirmed your order and is packing it.${o.paymentMethod === 'online' ? `\n\nPlease pay ₹${o.total} here: ${base}/pay.html?id=${o.paymentId}` : ''}\n\n${ordersUrl}`],
+    packed: [`Your order is packed 📦`, o.fulfilment === 'delivery'
+      ? `Your order from ${shop.shopName} is packed and will leave with a delivery partner shortly.\n\n${ordersUrl}`
+      : `Your order from ${shop.shopName} is packed and ready. Walk in and collect it at ${shop.shopName}, ${shop.area}.\n\n${ordersUrl}`],
+    out_for_delivery: [`Your order is on the way 🛵`, `${o.rider?.name || 'Your delivery partner'} is on the way with your order from ${shop.shopName}. Watch them live on the map: ${base}/customer.html?track=${o.id}`],
+    completed: [`Thanks for shopping at ${shop.shopName}`, `Your order is complete. See you again!\n\n${ordersUrl}`],
+    cancelled: [`Your order was cancelled`, `Your order from ${shop.shopName} was cancelled. Nothing was charged for it.\n\n${ordersUrl}`],
+  }[o.status];
+  if (msg) notify(o.customerEmail, msg[0], msg[1]);
+  if (o.status === 'placed') {
+    notify(shop.email, `New order from ${o.customerName}: please confirm`, `${o.customerName} (${o.customerPhone}) placed a ${o.fulfilment} order.\n\n${itemsText(o)}\n\nPayment: ${o.paymentMethod.replace(/_/g, ' ')}\n\nConfirm it here: ${base}/owner.html`);
+  }
 }
 
 // ---- Inventory ----
@@ -84,16 +119,21 @@ function priceLines(shopId, items) {
   });
 }
 
+// Idempotent: a given (reason, refId, product) stock move is applied at most once,
+// so a retried order, cancel or bill can never change stock twice.
 function moveStock(shopId, lines, sign, reason, refId) {
   for (const l of lines) {
     const p = db.products.find((x) => x.id === l.productId);
     if (!p) continue;
+    if (refId && db.stockMoves.some((m) => m.refId === refId && m.reason === reason && m.productId === p.id)) continue;
     p.stock += sign * l.qty;
     db.stockMoves.push({ id: id(), shopId, productId: p.id, delta: sign * l.qty, reason, refId, at: now() });
   }
 }
 
-// ---- Payments: Pine Labs payment link, or a clearly-labelled test page when keys aren't set ----
+const validKey = (k) => typeof k === 'string' && /^[\w-]{8,64}$/.test(k);
+
+// ---- Payments: Pine Labs link when keys are set, otherwise our UPI QR page ----
 async function createPayment({ kind, refId, shopId, amount, description, customerName, customerPhone }) {
   const p = { id: id(), kind, refId, shopId, amount, description, status: 'pending', at: now() };
   if (pinelabs.isConfigured()) {
@@ -105,7 +145,7 @@ async function createPayment({ kind, refId, shopId, amount, description, custome
       fail(502, err.message);
     }
   } else {
-    Object.assign(p, { provider: 'test', link: `/pay.html?id=${p.id}` });
+    Object.assign(p, { provider: 'upi_qr', link: `/pay.html?id=${p.id}` });
   }
   db.payments.push(p);
   log('system', 'payment_link_created', { paymentId: p.id, kind, refId, amount, provider: p.provider });
@@ -124,16 +164,34 @@ function markPaid(p, source) {
   if (p.status === 'paid') return;
   p.status = 'paid';
   p.paidAt = now();
-  log(source, 'payment_received', { paymentId: p.id, kind: p.kind, refId: p.refId, amount: p.amount });
+  log(source, 'payment_received', { paymentId: p.id, kind: p.kind, refId: p.refId, amount: p.amount, utr: p.utr });
   if (p.kind === 'order') {
     const o = db.orders.find((x) => x.id === p.refId);
     if (o) o.paymentStatus = 'paid';
   } else if (p.kind === 'plan') {
     const shop = db.shops.find((s) => s.id === p.shopId);
-    if (shop) activatePlan(shop, p.refId);
+    if (shop && !p.planActivated) { p.planActivated = true; activatePlan(shop, p.refId); }
   } else if (p.kind === 'khata') {
     const r = db.reminders.find((x) => x.id === p.refId);
-    if (r && r.status === 'approved') settleReminder(r, `Paid via ${p.provider} link ${p.providerId || p.id}`);
+    if (r && r.status === 'approved') settleReminder(r, `Paid via ${p.provider} ${p.utr ? 'UTR ' + p.utr : p.providerId || p.id}`);
+  }
+  save();
+}
+
+// Payer says "I've paid" on the QR page. Plans go live straight away (UTR kept for checking);
+// orders and khata wait for the shopkeeper to confirm the money arrived.
+function claimPaid(p, utr) {
+  if (p.status !== 'pending') return;
+  p.status = 'claimed';
+  p.utr = utr;
+  p.claimedAt = now();
+  log('payer', 'payment_claimed', { paymentId: p.id, kind: p.kind, refId: p.refId, amount: p.amount, utr });
+  if (p.kind === 'order') {
+    const o = db.orders.find((x) => x.id === p.refId);
+    if (o) o.paymentStatus = 'claimed';
+  } else if (p.kind === 'plan') {
+    const shop = db.shops.find((s) => s.id === p.shopId);
+    if (shop && !p.planActivated) { p.planActivated = true; activatePlan(shop, p.refId); }
   }
   save();
 }
@@ -144,35 +202,73 @@ function settleReminder(r, note) {
 }
 
 const app = express();
+app.set('trust proxy', true);
 app.use(express.json());
 app.use(express.static('public'));
+const baseUrl = (req) => process.env.PUBLIC_URL?.replace(/\/$/, '') || `${req.protocol}://${req.get('host')}`;
 
 app.get('/api/config', (req, res) => res.json({
-  paymentsLive: pinelabs.isConfigured(), agentConnected: agenticorg.isConfigured(), plans: PLANS,
+  paymentsLive: pinelabs.isConfigured(), agentConnected: agenticorg.isConfigured(), emailOn: mailer.isConfigured(),
+  googleClientId: process.env.GOOGLE_CLIENT_ID || null, plans: PLANS, areas: AREA_CENTERS,
 }));
 
+// ---- Sign in with Google (both sides) ----
+// Without GOOGLE_CLIENT_ID the app runs in demo mode: any email is accepted, clearly labelled in the UI.
+async function verifyGoogle({ credential, demoEmail, demoName }) {
+  if (!process.env.GOOGLE_CLIENT_ID) {
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(demoEmail || '')) fail(400, 'Enter a valid email');
+    return { email: demoEmail.toLowerCase(), name: demoName || demoEmail.split('@')[0] };
+  }
+  if (!credential) fail(400, 'Google sign-in missing');
+  const r = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(credential)}`);
+  const t = await r.json().catch(() => ({}));
+  if (!r.ok || t.aud !== process.env.GOOGLE_CLIENT_ID || t.email_verified !== 'true') fail(401, 'Google sign-in failed');
+  return { email: t.email.toLowerCase(), name: t.name || t.email.split('@')[0], picture: t.picture };
+}
+
+const pendingOwners = new Map(); // signup ticket -> verified Google profile, until the shop is registered
+
+app.post('/api/auth/google', async (req, res) => {
+  const g = await verifyGoogle(req.body);
+  if (req.body.role === 'owner') {
+    const shop = db.shops.find((s) => s.email === g.email);
+    if (!shop) {
+      const ticket = token();
+      pendingOwners.set(ticket, g);
+      return res.json({ needsShop: true, ticket, name: g.name, email: g.email });
+    }
+    shop.token ??= token();
+    save();
+    return res.json({ shop: privateShop(shop), token: shop.token });
+  }
+  let c = db.customers.find((x) => x.email === g.email);
+  if (!c) {
+    c = { id: id(), name: g.name, email: g.email, at: now() };
+    db.customers.push(c);
+    log('customer', 'signup', { customerId: c.id, name: g.name });
+  }
+  c.token ??= token();
+  save();
+  res.json({ customer: customerView(c), token: c.token });
+});
+
 // ---- Customer side ----
+const customerView = (c) => ({ id: c.id, name: c.name, email: c.email, phone: c.phone, area: c.area, profileDone: Boolean(c.phone && c.area) });
 const customerAuth = (req, res, next) => {
   req.customer = db.customers.find((c) => c.token && c.token === req.get('x-customer-token'));
   req.customer ? next() : res.status(401).json({ error: 'Please log in again' });
 };
 
-app.post('/api/customers/login', (req, res) => {
+app.patch('/api/customers/me', customerAuth, (req, res) => {
   const { name, phone, area } = req.body;
-  if (!name || !/^\d{10}$/.test(phone || '')) fail(400, 'Name and a 10-digit phone number are required');
-  let c = db.customers.find((x) => x.phone === phone);
-  if (!c) {
-    c = { id: id(), name, phone, area, at: now() };
-    db.customers.push(c);
-    log('customer', 'signup', { customerId: c.id, name, area });
-  }
-  c.token ??= token();
-  if (area) c.area = area;
+  if (!/^\d{10}$/.test(phone || '')) fail(400, 'Enter a 10-digit phone number');
+  if (!area) fail(400, 'Choose your area');
+  Object.assign(req.customer, { phone, area, name: name || req.customer.name });
   save();
-  res.json({ customer: { id: c.id, name: c.name, phone: c.phone, area: c.area }, token: c.token });
+  res.json(customerView(req.customer));
 });
 
-app.get('/api/areas', (req, res) => res.json([...new Set(db.shops.map((s) => s.area).filter(Boolean))].sort()));
+app.get('/api/areas', (req, res) => res.json([...new Set([...Object.keys(AREA_CENTERS), ...db.shops.map((s) => s.area)].filter(Boolean))].sort()));
 
 // Premium shops are "featured" in every area; day-pass shops show only in their own area.
 app.get('/api/market/shops', (req, res) => {
@@ -199,8 +295,17 @@ app.get('/api/market/shops/:id', (req, res) => {
   });
 });
 
-app.post('/api/orders', customerAuth, async (req, res) => {
-  const { shopId, items, fulfilment, address, paymentMethod } = req.body;
+// Placing an order reserves the stock straight away (so two people can't buy the last packet);
+// the shop then confirms or rejects it. The client sends an idempotency key per checkout, so
+// double-taps and network retries return the same order instead of reserving stock twice.
+app.post('/api/orders', customerAuth, (req, res) => {
+  const { shopId, items, fulfilment, address, location, paymentMethod, idempotencyKey } = req.body;
+  const c = req.customer;
+  if (!validKey(idempotencyKey)) fail(400, 'Missing idempotency key');
+  const existing = db.orders.find((o) => o.customerId === c.id && o.idempotencyKey === idempotencyKey);
+  if (existing) return res.json({ order: existing, duplicate: true });
+
+  if (!c.phone) fail(400, 'Add your phone number first');
   const shop = db.shops.find((s) => s.id === shopId);
   if (!shop || !planActive(shop)) fail(400, 'This shop is not taking orders today');
   if (!['pickup', 'delivery'].includes(fulfilment)) fail(400, 'Choose pickup or delivery');
@@ -208,53 +313,64 @@ app.post('/api/orders', customerAuth, async (req, res) => {
   if (fulfilment === 'delivery' && !address) fail(400, 'Delivery address required');
   if (!['online', 'pay_at_shop', 'khata'].includes(paymentMethod)) fail(400, 'Choose a payment method');
 
-  let lines = priceLines(shop.id, items);
-  const c = req.customer;
+  const lines = priceLines(shop.id, items);
   const order = {
-    id: id(), shopId: shop.id, channel: 'online', customerId: c.id, customerName: c.name, customerPhone: c.phone,
+    id: id(), idempotencyKey, shopId: shop.id, channel: 'online',
+    customerId: c.id, customerName: c.name, customerPhone: c.phone, customerEmail: c.email,
     items: lines, total: lines.reduce((t, l) => t + l.price * l.qty, 0), fulfilment, address: address || null,
-    paymentMethod, paymentStatus: 'pending', status: 'placed', at: now(),
+    location: fulfilment === 'delivery' ? (validPoint(location) ? location : AREA_CENTERS[c.area] || { lat: shop.lat, lng: shop.lng }) : null,
+    paymentMethod, paymentStatus: 'pending', status: 'placed', timeline: [{ status: 'placed', at: now() }], at: now(),
   };
-  let payment;
-  if (paymentMethod === 'online') {
-    payment = await createPayment({ kind: 'order', refId: order.id, shopId: shop.id, amount: order.total, description: `Order at ${shop.shopName}`, customerName: c.name, customerPhone: c.phone });
-    order.paymentId = payment.id;
-    lines = priceLines(shop.id, items); // stock may have moved while we waited on Pine Labs
-  }
   moveStock(shop.id, lines, -1, 'order', order.id);
   db.orders.push(order);
   log('customer', 'order_placed', { orderId: order.id, shopId: shop.id, total: order.total, fulfilment, paymentMethod });
-  res.json({ order, paymentLink: payment?.link });
+  emailForStatus(order, baseUrl(req));
+  res.json({ order });
 });
 
+const orderForCustomer = (o) => {
+  const shop = shopOf(o);
+  return {
+    ...o, idempotencyKey: undefined,
+    shopName: shop?.shopName, shopPhone: shop?.phone, shopArea: shop?.area,
+    paymentLink: o.paymentId && o.paymentStatus === 'pending' ? db.payments.find((p) => p.id === o.paymentId)?.link : undefined,
+    rider: o.rider && { name: o.rider.name, phone: o.rider.phone, lat: o.rider.lat, lng: o.rider.lng, at: o.rider.at },
+  };
+};
+
 app.get('/api/customers/me/orders', customerAuth, (req, res) => {
-  res.json(db.orders.filter((o) => o.customerId === req.customer.id && !o.mock).reverse().map((o) => ({
-    ...o,
-    shopName: db.shops.find((s) => s.id === o.shopId)?.shopName,
-    paymentLink: o.paymentStatus === 'pending' ? db.payments.find((p) => p.id === o.paymentId)?.link : undefined,
-  })));
+  res.json(db.orders.filter((o) => o.customerId === req.customer.id && !o.mock).reverse().map(orderForCustomer));
+});
+
+app.get('/api/orders/:id/track', customerAuth, (req, res) => {
+  const o = db.orders.find((x) => x.id === req.params.id && x.customerId === req.customer.id);
+  if (!o) fail(404, 'Order not found');
+  const shop = shopOf(o);
+  res.json({ ...orderForCustomer(o), shopLocation: { lat: shop.lat, lng: shop.lng } });
 });
 
 app.post('/api/orders/:id/cancel', customerAuth, (req, res) => {
   const o = db.orders.find((x) => x.id === req.params.id && x.customerId === req.customer.id);
-  if (!o || o.status !== 'placed') fail(400, 'Only orders the shop has not accepted yet can be cancelled');
-  o.status = 'cancelled';
-  moveStock(o.shopId, o.items, +1, 'cancel', o.id);
-  log('customer', 'order_cancelled', { orderId: o.id });
+  if (!o) fail(404, 'Order not found');
+  if (o.status === 'cancelled') return res.json(o);
+  if (o.status !== 'placed') fail(400, 'The shop has already confirmed this order. Call them to cancel.');
+  setStatus(o, 'cancelled', 'customer', baseUrl(req));
   res.json(o);
 });
 
-// ---- Payment pages ----
+// ---- Payment page (UPI QR) ----
 app.get('/api/payments/:id', (req, res) => {
   const p = db.payments.find((x) => x.id === req.params.id);
   if (!p) fail(404, 'Payment not found');
   res.json({ id: p.id, amount: p.amount, description: p.description, status: p.status, provider: p.provider, kind: p.kind });
 });
 
-app.post('/api/payments/:id/test-pay', (req, res) => {
+app.post('/api/payments/:id/claim', (req, res) => {
   const p = db.payments.find((x) => x.id === req.params.id);
-  if (!p || p.provider !== 'test') fail(400, 'Not a test payment');
-  markPaid(p, 'test_payment');
+  if (!p || p.provider !== 'upi_qr') fail(400, 'Not a UPI payment');
+  const utr = String(req.body.utr || '').trim();
+  if (!/^[A-Za-z0-9]{6,22}$/.test(utr)) fail(400, 'Enter the UPI reference / UTR number from your payment app');
+  claimPaid(p, utr);
   res.json({ status: p.status });
 });
 
@@ -269,6 +385,32 @@ app.post('/api/pinelabs/webhook', (req, res) => {
   res.sendStatus(200);
 });
 
+// ---- Delivery rider (opens a link on their phone; shares GPS) ----
+app.get('/api/rider/:orderId', (req, res) => {
+  const o = db.orders.find((x) => x.id === req.params.orderId);
+  if (!o?.rider || o.rider.key !== req.query.key) fail(403, 'Invalid rider link');
+  const shop = shopOf(o);
+  res.json({ status: o.status, shopName: shop.shopName, shopLocation: { lat: shop.lat, lng: shop.lng }, destination: o.location, address: o.address, customerName: o.customerName, customerPhone: o.customerPhone, items: o.items, total: o.total, paymentMethod: o.paymentMethod, paymentStatus: o.paymentStatus });
+});
+
+app.post('/api/rider/:orderId/location', (req, res) => {
+  const o = db.orders.find((x) => x.id === req.params.orderId);
+  if (!o?.rider || o.rider.key !== req.body.key) fail(403, 'Invalid rider link');
+  if (o.status !== 'out_for_delivery') fail(400, 'This delivery is not active');
+  const lat = Number(req.body.lat), lng = Number(req.body.lng);
+  if (!validPoint({ lat, lng })) fail(400, 'Bad location');
+  Object.assign(o.rider, { lat, lng, at: now() });
+  save();
+  res.json({ ok: true });
+});
+
+app.post('/api/rider/:orderId/delivered', (req, res) => {
+  const o = db.orders.find((x) => x.id === req.params.orderId);
+  if (!o?.rider || o.rider.key !== req.body.key) fail(403, 'Invalid rider link');
+  if (o.status !== 'completed') setStatus(o, 'completed', 'rider', baseUrl(req));
+  res.json({ status: o.status });
+});
+
 // ---- Shop owner side ----
 const ownerAuth = (req, res, next) => {
   req.shop = db.shops.find((s) => s.token && s.token === req.get('x-owner-token'));
@@ -276,20 +418,24 @@ const ownerAuth = (req, res, next) => {
 };
 
 app.post('/api/owner/signup', (req, res) => {
-  const { ownerName, shopName, phone, pin, area, category } = req.body;
-  if (!ownerName || !shopName || !area) fail(400, 'Name, shop name and area are required');
+  const g = pendingOwners.get(req.body.ticket);
+  if (!g) fail(401, 'Please sign in with Google again');
+  const { shopName, phone, area, category, location } = req.body;
+  if (!shopName || !area) fail(400, 'Shop name and area are required');
   if (!/^\d{10}$/.test(phone || '')) fail(400, 'Enter a 10-digit phone number');
-  if (!/^\d{4}$/.test(pin || '')) fail(400, 'PIN must be 4 digits');
-  if (db.shops.some((s) => s.phone === phone)) fail(409, 'A shop with this phone already exists. Log in instead.');
-  const shop = { id: id(), ownerName, shopName, phone, pin, area, category: category || 'kirana', plan: null, token: token(), at: now() };
+  if (db.shops.some((s) => s.email === g.email)) fail(409, 'This Google account already has a shop');
+  const pin = validPoint(location) ? location : AREA_CENTERS[area] || AREA_CENTERS.Indiranagar;
+  const shop = { id: id(), ownerName: g.name, email: g.email, shopName, phone, area, category: category || 'kirana', lat: pin.lat, lng: pin.lng, plan: null, token: token(), at: now() };
   db.shops.push(shop);
-  log('shopkeeper', 'signup', { shopId: shop.id, shopName, ownerName, area });
+  pendingOwners.delete(req.body.ticket);
+  log('shopkeeper', 'signup', { shopId: shop.id, shopName, area });
   res.json({ shop: privateShop(shop), token: shop.token });
 });
 
-app.post('/api/owner/login', (req, res) => {
-  const shop = db.shops.find((s) => s.phone === req.body.phone && s.pin === req.body.pin);
-  if (!shop) fail(401, 'Wrong phone or PIN');
+// Phone + PIN only works for the seeded demo shops; real owners sign in with Google.
+app.post('/api/owner/demo-login', (req, res) => {
+  const shop = db.shops.find((s) => s.mock && s.phone === req.body.phone && s.pin === req.body.pin);
+  if (!shop) fail(401, 'Wrong demo phone or PIN');
   shop.token ??= token();
   save();
   res.json({ shop: privateShop(shop), token: shop.token });
@@ -299,36 +445,96 @@ app.get('/api/owner/me', ownerAuth, (req, res) => {
   const mine = db.orders.filter((o) => o.shopId === req.shop.id);
   res.json({
     shop: privateShop(req.shop),
-    openOrders: mine.filter((o) => ['placed', 'accepted', 'ready', 'out_for_delivery'].includes(o.status)).length,
+    toConfirm: mine.filter((o) => o.status === 'placed').length,
+    openOrders: mine.filter((o) => ['placed', 'confirmed', 'packed', 'out_for_delivery'].includes(o.status)).length,
     lowStock: db.products.filter((p) => p.shopId === req.shop.id && p.stock <= p.lowStockAt).length,
   });
 });
 
 app.get('/api/owner/orders', ownerAuth, (req, res) => {
-  res.json(db.orders.filter((o) => o.shopId === req.shop.id).sort((a, b) => b.at.localeCompare(a.at)).slice(0, 60));
+  res.json(db.orders.filter((o) => o.shopId === req.shop.id).sort((a, b) => b.at.localeCompare(a.at)).slice(0, 60)
+    .map((o) => ({ ...o, idempotencyKey: undefined, rider: o.rider && { ...o.rider, link: `/rider.html?o=${o.id}&k=${o.rider.key}` }, utr: db.payments.find((p) => p.id === o.paymentId)?.utr })));
 });
 
-const NEXT = { placed: ['accepted', 'cancelled'], accepted: ['ready', 'out_for_delivery', 'cancelled'], ready: ['completed'], out_for_delivery: ['completed'] };
-app.post('/api/owner/orders/:id/status', ownerAuth, (req, res) => {
-  const o = db.orders.find((x) => x.id === req.params.id && x.shopId === req.shop.id);
-  const { status } = req.body;
-  if (!o || !NEXT[o.status]?.includes(status)) fail(400, `Can't move this order to ${status}`);
-  if (status === 'out_for_delivery' && o.fulfilment !== 'delivery') fail(400, 'This is a pickup order');
-  if (status === 'ready' && o.fulfilment === 'delivery') fail(400, 'This is a delivery order');
-  // Accepting a khata order is the shopkeeper agreeing to give credit.
-  if (status === 'accepted' && o.paymentMethod === 'khata') {
-    addKhata(o.shopId, { customerName: o.customerName, customerPhone: o.customerPhone, amount: o.total, type: 'credit', note: `Order ${o.id}` });
-    o.paymentStatus = 'on_khata';
-  }
+const NEXT = (o) => ({
+  placed: ['confirmed', 'cancelled'],
+  confirmed: ['packed', 'cancelled'],
+  packed: o.fulfilment === 'delivery' ? ['out_for_delivery', 'cancelled'] : ['completed', 'cancelled'],
+  out_for_delivery: ['completed'],
+}[o.status] || []);
+
+function setStatus(o, status, actor, base) {
   if (status === 'cancelled') {
     moveStock(o.shopId, o.items, +1, 'cancel', o.id);
     if (o.paymentStatus === 'on_khata') addKhata(o.shopId, { customerName: o.customerName, customerPhone: o.customerPhone, amount: o.total, type: 'payment', note: `Order ${o.id} cancelled` });
   }
   if (status === 'completed' && o.paymentMethod === 'pay_at_shop') o.paymentStatus = 'paid';
   o.status = status;
-  log('shopkeeper', `order_${status}`, { orderId: o.id });
+  o.timeline = [...(o.timeline || []), { status, at: now() }];
+  log(actor, `order_${status}`, { orderId: o.id });
+  emailForStatus(o, base);
+}
+
+app.post('/api/owner/orders/:id/status', ownerAuth, async (req, res) => {
+  const o = db.orders.find((x) => x.id === req.params.id && x.shopId === req.shop.id);
+  const { status, rider } = req.body;
+  if (!o) fail(404, 'Order not found');
+  if (o.status === status) return res.json(o); // repeated click: nothing to do
+  if (!NEXT(o).includes(status)) fail(400, `Can't move a ${o.status} order to ${status}`);
+  if (status === 'confirmed') {
+    // Confirming a khata order is the shopkeeper agreeing to give credit.
+    if (o.paymentMethod === 'khata') {
+      addKhata(o.shopId, { customerName: o.customerName, customerPhone: o.customerPhone, amount: o.total, type: 'credit', note: `Order ${o.id}` });
+      o.paymentStatus = 'on_khata';
+    }
+    if (o.paymentMethod === 'online' && !o.paymentId) {
+      const p = await createPayment({ kind: 'order', refId: o.id, shopId: o.shopId, amount: o.total, description: `Order at ${req.shop.shopName}`, customerName: o.customerName, customerPhone: o.customerPhone });
+      o.paymentId = p.id;
+    }
+  }
+  if (status === 'out_for_delivery') {
+    if (!rider?.name || !/^\d{10}$/.test(rider.phone || '')) fail(400, 'Enter the delivery partner\'s name and 10-digit phone');
+    o.rider = { name: rider.name, phone: rider.phone, key: token(), lat: req.shop.lat, lng: req.shop.lng, at: now() };
+  }
+  setStatus(o, status, 'shopkeeper', baseUrl(req));
   res.json(o);
 });
+
+app.post('/api/owner/orders/:id/payment-received', ownerAuth, (req, res) => {
+  const o = db.orders.find((x) => x.id === req.params.id && x.shopId === req.shop.id);
+  if (!o) fail(404, 'Order not found');
+  const p = db.payments.find((x) => x.id === o.paymentId);
+  if (p) markPaid(p, 'shopkeeper');
+  else { o.paymentStatus = 'paid'; log('shopkeeper', 'payment_received', { orderId: o.id, amount: o.total }); }
+  res.json(o);
+});
+
+// The shop's own customers and what they buy — the base the timing and demand agents build on.
+function shopCustomers(shopId) {
+  const map = {};
+  for (const o of db.orders.filter((o) => o.shopId === shopId && o.status !== 'cancelled' && o.customerPhone)) {
+    const c = map[o.customerPhone] ??= { name: o.customerName, phone: o.customerPhone, email: o.customerEmail, orders: 0, spend: 0, lastOrderAt: o.at, items: {}, hours: {} };
+    c.orders++;
+    c.spend += o.total;
+    if (o.at > c.lastOrderAt) c.lastOrderAt = o.at;
+    c.email ??= o.customerEmail;
+    c.hours[istHour(o.at)] = (c.hours[istHour(o.at)] || 0) + 1;
+    for (const l of o.items) c.items[l.name] = (c.items[l.name] || 0) + l.qty;
+  }
+  const dues = Object.fromEntries(balances(shopId).map((b) => [b.customerPhone, b.balance]));
+  return Object.values(map).map(({ items, hours, ...c }) => {
+    const [hour, count] = Object.entries(hours).sort((a, b) => b[1] - a[1])[0];
+    return {
+      ...c,
+      khata: dues[c.phone] || 0,
+      favourites: Object.entries(items).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([name, qty]) => ({ name, qty })),
+      usualHour: Number(hour),
+      usualHourShare: Math.round((count / c.orders) * 100),
+    };
+  }).sort((a, b) => b.lastOrderAt.localeCompare(a.lastOrderAt));
+}
+
+app.get('/api/owner/customers', ownerAuth, (req, res) => res.json(shopCustomers(req.shop.id)));
 
 app.get('/api/owner/products', ownerAuth, (req, res) => {
   res.json(db.products.filter((p) => p.shopId === req.shop.id).sort((a, b) => a.category.localeCompare(b.category) || a.name.localeCompare(b.name)));
@@ -355,32 +561,39 @@ app.patch('/api/owner/products/:id', ownerAuth, (req, res) => {
   res.json(p);
 });
 
+// Restock is idempotent too: the client sends a key per click, so a retried request adds stock once.
 app.post('/api/owner/products/:id/restock', ownerAuth, (req, res) => {
   const p = db.products.find((x) => x.id === req.params.id && x.shopId === req.shop.id);
   const qty = Number(req.body.qty);
   if (!p) fail(404, 'Product not found');
+  if (!validKey(req.body.idempotencyKey)) fail(400, 'Missing idempotency key');
   if (!Number.isInteger(qty) || qty < 1 || qty > 10000) fail(400, 'Restock quantity must be a whole number above 0');
-  moveStock(p.shopId, [{ productId: p.id, qty }], +1, 'restock');
-  log('shopkeeper', 'restocked', { productId: p.id, name: p.name, qty, stock: p.stock });
+  const before = p.stock;
+  moveStock(p.shopId, [{ productId: p.id, qty }], +1, 'restock', req.body.idempotencyKey);
+  if (p.stock !== before) log('shopkeeper', 'restocked', { productId: p.id, name: p.name, qty, stock: p.stock });
   res.json(p);
 });
 
-// Walk-in billing at the counter: stock goes down immediately.
+// Walk-in billing at the counter: stock goes down immediately (once per idempotency key).
 app.post('/api/owner/bills', ownerAuth, async (req, res) => {
-  const { items, customerName, customerPhone, paymentMethod } = req.body;
-  if (!['cash', 'online', 'khata'].includes(paymentMethod)) fail(400, 'Choose cash, payment link or khata');
-  if (paymentMethod !== 'cash' && (!customerName || !/^\d{10}$/.test(customerPhone || ''))) fail(400, 'Customer name and 10-digit phone needed for link or khata');
+  const { items, customerName, customerPhone, paymentMethod, idempotencyKey } = req.body;
+  if (!validKey(idempotencyKey)) fail(400, 'Missing idempotency key');
+  const existing = db.orders.find((o) => o.shopId === req.shop.id && o.idempotencyKey === idempotencyKey);
+  if (existing) return res.json({ bill: existing, paymentLink: db.payments.find((p) => p.id === existing.paymentId)?.link, duplicate: true });
+  if (!['cash', 'online', 'khata'].includes(paymentMethod)) fail(400, 'Choose cash, UPI QR or khata');
+  if (paymentMethod === 'khata' && (!customerName || !/^\d{10}$/.test(customerPhone || ''))) fail(400, 'Customer name and 10-digit phone needed for khata');
+  if (customerPhone && !/^\d{10}$/.test(customerPhone)) fail(400, 'Phone must be 10 digits');
   let lines = priceLines(req.shop.id, items);
   const bill = {
-    id: id(), shopId: req.shop.id, channel: 'walk_in', customerId: null, customerName: customerName || 'Walk-in', customerPhone: customerPhone || null,
+    id: id(), idempotencyKey, shopId: req.shop.id, channel: 'walk_in', customerId: null, customerName: customerName || 'Walk-in', customerPhone: customerPhone || null,
     items: lines, total: lines.reduce((t, l) => t + l.price * l.qty, 0), fulfilment: 'counter',
-    paymentMethod, paymentStatus: paymentMethod === 'cash' ? 'paid' : 'pending', status: 'completed', at: now(),
+    paymentMethod, paymentStatus: paymentMethod === 'cash' ? 'paid' : 'pending', status: 'completed', timeline: [{ status: 'completed', at: now() }], at: now(),
   };
   let payment;
   if (paymentMethod === 'online') {
     payment = await createPayment({ kind: 'order', refId: bill.id, shopId: req.shop.id, amount: bill.total, description: `Bill at ${req.shop.shopName}`, customerName, customerPhone });
     bill.paymentId = payment.id;
-    lines = priceLines(req.shop.id, items);
+    lines = priceLines(req.shop.id, items); // stock may have moved while we waited on Pine Labs
   }
   if (paymentMethod === 'khata') {
     addKhata(req.shop.id, { customerName, customerPhone, amount: bill.total, type: 'credit', note: `Bill ${bill.id}` });
@@ -427,15 +640,9 @@ app.get('/api/owner/insights', ownerAuth, (req, res) => {
     const day = istDay(t - i * DAY);
     salesByDay.push({ day, revenue: revenue(orders.filter((o) => istDay(o.at) === day)) });
   }
+  const ordersByHour = Array.from({ length: 24 }, (_, h) => last30.filter((o) => istHour(o.at) === h).length);
 
-  const byCustomer = {};
-  for (const o of last30.filter((o) => o.customerPhone)) {
-    byCustomer[o.customerPhone] ??= { name: o.customerName, orders: 0, spend: 0 };
-    byCustomer[o.customerPhone].orders++;
-    byCustomer[o.customerPhone].spend += o.total;
-  }
-  const customers = Object.values(byCustomer);
-
+  const customers = shopCustomers(shopId).filter((c) => t - Date.parse(c.lastOrderAt) < 30 * DAY);
   const products = db.products.filter((p) => p.shopId === shopId);
   const lowStock = products.filter((p) => p.stock <= p.lowStockAt).map(({ id, name, stock }) => ({ id, name, stock }));
   const views30 = db.views.filter((v) => v.shopId === shopId && t - Date.parse(v.at) < 30 * DAY).length;
@@ -447,7 +654,8 @@ app.get('/api/owner/insights', ownerAuth, (req, res) => {
     channels: { online: online30, walkIn: last30.length - online30 },
     topProducts,
     salesByDay,
-    topCustomers: customers.sort((a, b) => b.spend - a.spend).slice(0, 5),
+    ordersByHour,
+    topCustomers: [...customers].sort((a, b) => b.spend - a.spend).slice(0, 5),
     repeatCustomers: customers.filter((c) => c.orders > 1).length,
     reach: { views30, conversion: views30 ? Math.round((online30 / views30) * 100) : 0 },
     lowStock,
@@ -572,7 +780,7 @@ app.post('/api/agent/reminders', agentAuth, (req, res) => {
 
 // Remote MCP (Streamable HTTP, stateless) — register in AgenticOrg under Connectors > Remote MCP.
 function buildMcpServer() {
-  const server = new McpServer({ name: 'khata-agent', version: '1.1.0' });
+  const server = new McpServer({ name: 'khata-agent', version: '1.2.0' });
   const asText = (data) => ({ content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] });
   server.registerTool('get_dues', {
     description: 'List kirana shops with customers who owe money on khata (udhaar): shopId, shop/owner name, customer name, phone and balance in rupees. Pass shopId to check one shop.',
@@ -585,7 +793,7 @@ function buildMcpServer() {
     annotations: { readOnlyHint: true },
   }, async ({ shopId }) => asText(getLowStock(shopId)));
   server.registerTool('draft_reminder', {
-    description: 'Save a polite payment-reminder DRAFT for one customer, written in the shopkeeper\'s name. Does not send anything: the shopkeeper must approve it in the app, which then creates a Pine Labs payment link.',
+    description: 'Save a polite payment-reminder DRAFT for one customer, written in the shopkeeper\'s name. Does not send anything: the shopkeeper must approve it in the app, which then creates a payment link.',
     inputSchema: {
       shopId: z.string().describe('shopId from get_dues'),
       customerPhone: z.string().describe('customerPhone from get_dues'),
@@ -606,9 +814,11 @@ app.post('/mcp', agentAuth, async (req, res) => {
 });
 app.all('/mcp', (req, res) => res.status(405).json({ error: 'Use POST' }));
 
-// Public proof log; phone numbers are masked.
+// Public proof log; phone numbers and emails are masked.
 app.get('/api/logs', (req, res) => {
-  res.json(JSON.parse(JSON.stringify(db.logs.slice().reverse()).replace(/\b(\d{2})\d{6}(\d{2})\b/g, '$1******$2')));
+  res.json(JSON.parse(JSON.stringify(db.logs.slice().reverse())
+    .replace(/\b(\d{2})\d{6}(\d{2})\b/g, '$1******$2')
+    .replace(/\b([\w.+-])[\w.+-]*@([\w-]+\.[\w.]+)/g, '$1***@$2')));
 });
 
 app.use((err, req, res, next) => {

@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Delivery — Khata Agent</title>
+<link rel="stylesheet" href="/styles.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+</head>
+<body>
+<header class="top"><div class="bar"><span class="logo">Khata<span>Agent</span> · Delivery</span></div></header>
+<main>
+  <div class="card">
+    <h2 id="title"></h2>
+    <p id="dest"></p>
+    <p class="muted" id="items"></p>
+    <div class="row">
+      <a id="callBtn"><button class="small secondary">📞 Call customer</button></a>
+      <a id="navBtn" target="_blank"><button class="small secondary">🧭 Directions</button></a>
+    </div>
+  </div>
+  <div class="card">
+    <p class="muted" id="shareNote">Keep this page open while you ride. The customer sees your location live.</p>
+    <div class="row">
+      <button class="grow" id="shareBtn" onclick="startSharing()">Start sharing my location</button>
+      <button class="grow secondary" id="simBtn" onclick="simulate()">Simulate ride (demo)</button>
+    </div>
+    <div id="map" style="height:300px;border-radius:12px;margin-top:12px"></div>
+    <button class="block" style="margin-top:12px" id="doneBtn" onclick="delivered()">✓ Delivered</button>
+  </div>
+</main>
+<script src="/common.js"></script>
+<script>
+const params = new URLSearchParams(location.search);
+const orderId = params.get('o'), key = params.get('k');
+let o, map, me, watchId, simTimer;
+
+async function load() {
+  o = await api(`/api/rider/${encodeURIComponent(orderId)}?key=${encodeURIComponent(key)}`);
+  $('title').textContent = `Order #${orderId} from ${o.shopName}`;
+  $('dest').innerHTML = `<strong>${esc(o.customerName)}</strong> · ${esc(o.address || '')}<br>${rupees(o.total)} · ${o.paymentStatus === 'paid' ? 'already paid' : o.paymentMethod === 'pay_at_shop' ? '<strong>collect payment</strong>' : esc(label(o.paymentStatus))}`;
+  $('items').textContent = o.items.map((l) => `${l.name} ×${l.qty}`).join(', ');
+  $('callBtn').href = 'tel:' + o.customerPhone;
+  if (o.destination) $('navBtn').href = `https://www.google.com/maps/dir/?api=1&destination=${o.destination.lat},${o.destination.lng}`;
+  map = L.map('map');
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
+  const pin = (e) => L.divIcon({ html: `<div style="font-size:28px;line-height:28px">${e}</div>`, className: '', iconSize: [28, 28], iconAnchor: [14, 14] });
+  L.marker([o.shopLocation.lat, o.shopLocation.lng], { icon: pin('🏪') }).addTo(map);
+  if (o.destination) L.marker([o.destination.lat, o.destination.lng], { icon: pin('🏠') }).addTo(map);
+  me = L.marker([o.shopLocation.lat, o.shopLocation.lng], { icon: pin('🛵') }).addTo(map);
+  map.fitBounds([[o.shopLocation.lat, o.shopLocation.lng], o.destination ? [o.destination.lat, o.destination.lng] : [o.shopLocation.lat, o.shopLocation.lng]], { padding: [40, 40], maxZoom: 16 });
+  if (o.status !== 'out_for_delivery') finish(o.status === 'completed' ? 'This order is delivered ✓' : 'This delivery is not active.');
+}
+
+let lastSent = 0;
+async function send(lat, lng, force) {
+  me.setLatLng([lat, lng]);
+  if (!force && Date.now() - lastSent < 3000) return;
+  lastSent = Date.now();
+  await fetch(`/api/rider/${encodeURIComponent(orderId)}/location`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key, lat, lng }) });
+}
+
+function startSharing() {
+  if (!navigator.geolocation) return toast('GPS not available. Use Simulate ride.');
+  watchId = navigator.geolocation.watchPosition(
+    (p) => send(p.coords.latitude, p.coords.longitude),
+    () => toast('Location permission denied. Use Simulate ride.'),
+    { enableHighAccuracy: true, maximumAge: 2000 });
+  $('shareBtn').disabled = true; $('shareNote').textContent = '📡 Sharing your live location…';
+}
+
+// Demo: glide from the shop to the customer over ~40 seconds.
+function simulate() {
+  if (!o.destination) return toast('No destination on this order');
+  const a = o.shopLocation, b = o.destination, steps = 20;
+  let i = 0;
+  $('simBtn').disabled = true; $('shareNote').textContent = '🛵 Simulated ride in progress…';
+  simTimer = setInterval(() => {
+    i++;
+    send(a.lat + (b.lat - a.lat) * i / steps, a.lng + (b.lng - a.lng) * i / steps, true);
+    if (i >= steps) { clearInterval(simTimer); $('shareNote').textContent = 'Arrived. Tap Delivered when handed over.'; }
+  }, 2000);
+}
+
+async function delivered() {
+  await api(`/api/rider/${encodeURIComponent(orderId)}/delivered`, { body: { key } });
+  finish('Delivered ✓ Thank you!');
+}
+
+function finish(msg) {
+  if (watchId != null) navigator.geolocation.clearWatch(watchId);
+  clearInterval(simTimer);
+  ['shareBtn', 'simBtn', 'doneBtn'].forEach((b) => $(b).disabled = true);
+  $('shareNote').textContent = msg;
+}
+
+load();
+</script>
+</body>
+</html>

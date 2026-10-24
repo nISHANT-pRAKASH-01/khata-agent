@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Shop local — Khata Agent</title>
 <link rel="stylesheet" href="/styles.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 </head>
 <body>
 <header class="top"><div class="bar">
@@ -17,12 +19,21 @@
   <!-- Login -->
   <section id="v-login" class="hidden">
     <div class="card" style="max-width:420px;margin:24px auto">
-      <h2>Start shopping</h2>
-      <p class="muted">We use your number so the shop can call you when your order is packed.</p>
-      <label>Your name</label><input id="lName" autocomplete="name">
-      <label>Phone</label><input id="lPhone" inputmode="numeric" maxlength="10" placeholder="10-digit mobile">
-      <label>Your area</label><select id="lArea"></select>
-      <button class="block" style="margin-top:12px" onclick="login()">Continue</button>
+      <h2>Sign in to order</h2>
+      <p class="muted">Use your Gmail. We'll email you when the shop confirms and packs your order.</p>
+      <div id="signin"></div>
+    </div>
+  </section>
+
+  <!-- Profile -->
+  <section id="v-profile" class="hidden">
+    <div class="card" style="max-width:420px;margin:24px auto">
+      <h2>One last thing</h2>
+      <p class="muted">The shop uses your number to reach you on WhatsApp about your order.</p>
+      <label>Your name</label><input id="pName" autocomplete="name">
+      <label>Phone</label><input id="pPhone" inputmode="numeric" maxlength="10" placeholder="10-digit mobile">
+      <label>Your area</label><select id="pArea"></select>
+      <button class="block" style="margin-top:12px" onclick="saveProfile()">Start shopping</button>
     </div>
   </section>
 
@@ -59,16 +70,20 @@
     </div>
     <div class="card">
       <h3>How do you want it?</h3>
-      <label><input type="radio" name="ful" value="pickup" checked style="width:auto" onchange="syncCheckout()"> I'll pick it up (shop packs it for you)</label>
+      <label><input type="radio" name="ful" value="pickup" checked style="width:auto" onchange="syncCheckout()"> I'll pick it up: the shop packs it, I walk in and collect</label>
       <label id="delOpt"><input type="radio" name="ful" value="delivery" style="width:auto" onchange="syncCheckout()"> Deliver to me</label>
-      <textarea id="address" rows="2" class="hidden" placeholder="Flat, street, landmark"></textarea>
+      <div id="addrBox" class="hidden">
+        <textarea id="address" rows="2" placeholder="Flat, street, landmark"></textarea>
+        <button class="small secondary" onclick="useMyLocation()">📍 Use my current location</button> <span class="muted" id="locNote"></span>
+      </div>
     </div>
     <div class="card">
       <h3>Payment</h3>
-      <label><input type="radio" name="pay" value="online" checked style="width:auto"> Pay now: UPI / card via Pine Labs <span id="testNote" class="muted"></span></label>
+      <label><input type="radio" name="pay" value="online" checked style="width:auto"> Pay by UPI QR once the shop confirms</label>
       <label><input type="radio" name="pay" value="pay_at_shop" style="width:auto"> Pay at pickup / on delivery</label>
-      <label><input type="radio" name="pay" value="khata" style="width:auto"> Add to my khata (shop must approve the credit)</label>
-      <button class="block" style="margin-top:12px" id="placeBtn" onclick="placeOrder()">Place order</button>
+      <label><input type="radio" name="pay" value="khata" style="width:auto"> Add to my khata (the shop must agree)</label>
+      <button class="block" style="margin-top:12px" id="placeBtn" onclick="placeOrder()">Send order to shop</button>
+      <p class="muted">The shop confirms every order before it's final. You'll get an email at each step.</p>
     </div>
   </section>
 
@@ -78,20 +93,34 @@
     <h2>My orders</h2>
     <div id="orders"></div>
   </section>
+
+  <!-- Live tracking -->
+  <section id="v-track" class="hidden">
+    <button class="ghost" onclick="show('orders')">← My orders</button>
+    <div class="card">
+      <div class="row"><h2 class="grow" id="trTitle" style="margin:0"></h2><span class="badge" id="trStatus"></span></div>
+      <p class="muted" id="trMeta"></p>
+      <div id="map" style="height:360px;border-radius:12px;margin-top:8px"></div>
+      <div class="row" style="margin-top:8px" id="trActions"></div>
+    </div>
+  </section>
 </main>
 <script src="/common.js"></script>
 <script>
 let token = store.get('customerToken');
 let me = JSON.parse(store.get('customer') || 'null');
-let config = {};
-let shop = null, products = [], cart = {};
-const auth = () => ({ headers: { 'x-customer-token': token } });
+let shop = null, products = [], cart = {}, checkoutKey = null, myLocation = null;
+const auth = (extra) => ({ headers: { 'x-customer-token': token }, ...extra });
+const call = async (path, opts) => {
+  try { return await api(path, auth(opts)); } catch (err) { if (err.status === 401) logout(); throw err; }
+};
 
 function show(view) {
-  for (const v of ['login', 'shops', 'shop', 'checkout', 'orders']) $('v-' + v).classList.toggle('hidden', v !== view);
+  for (const v of ['login', 'profile', 'shops', 'shop', 'checkout', 'orders', 'track']) $('v-' + v).classList.toggle('hidden', v !== view);
   $('who').textContent = me ? `Hi, ${me.name}` : '';
-  $('ordersBtn').classList.toggle('hidden', !me);
+  $('ordersBtn').classList.toggle('hidden', !me?.profileDone);
   $('logoutBtn').classList.toggle('hidden', !me);
+  if (view !== 'track') stopTracking();
   if (view === 'shops') loadShops();
   if (view === 'shop') renderProducts();
   if (view === 'checkout') renderCheckout();
@@ -100,25 +129,45 @@ function show(view) {
 }
 
 async function init() {
-  const [areas, cfg] = await Promise.all([api('/api/areas'), api('/api/config')]);
-  config = cfg;
+  const areas = await api('/api/areas');
   const opts = areas.map((a) => `<option>${esc(a)}</option>`).join('');
-  $('lArea').innerHTML = opts;
+  $('pArea').innerHTML = opts;
   $('area').innerHTML = '<option value="">All areas</option>' + opts;
   if (me?.area) $('area').value = me.area;
-  $('testNote').textContent = config.paymentsLive ? '' : '(test mode)';
-  show(me ? (new URLSearchParams(location.search).has('orders') ? 'orders' : 'shops') : 'login');
+  if (!me) {
+    show('login');
+    mountSignIn($('signin'), 'customer', onSignedIn);
+    return;
+  }
+  if (!me.profileDone) return showProfile();
+  const params = new URLSearchParams(location.search);
+  if (params.has('track')) return track(params.get('track'));
+  show(params.has('orders') ? 'orders' : 'shops');
 }
 
-async function login() {
-  const r = await api('/api/customers/login', { body: { name: $('lName').value.trim(), phone: $('lPhone').value.trim(), area: $('lArea').value } });
+function onSignedIn(r) {
   token = r.token; me = r.customer;
   store.set('customerToken', token); store.set('customer', JSON.stringify(me));
-  $('area').value = me.area || '';
-  show('shops');
+  me.profileDone ? init() : showProfile();
 }
 
-function logout() { store.set('customerToken', null); store.set('customer', null); token = me = null; show('login'); }
+function showProfile() {
+  $('pName').value = me.name || ''; $('pPhone').value = me.phone || '';
+  if (me.area) $('pArea').value = me.area;
+  show('profile');
+}
+
+async function saveProfile() {
+  me = await call('/api/customers/me', { method: 'PATCH', body: { name: $('pName').value.trim(), phone: $('pPhone').value.trim(), area: $('pArea').value } });
+  store.set('customer', JSON.stringify(me));
+  $('area').value = me.area;
+  init();
+}
+
+function logout() {
+  store.set('customerToken', null); store.set('customer', null); token = me = null;
+  show('login'); mountSignIn($('signin'), 'customer', onSignedIn);
+}
 
 let shopsTimer;
 const debouncedShops = () => { clearTimeout(shopsTimer); shopsTimer = setTimeout(loadShops, 250); };
@@ -144,7 +193,7 @@ async function openShop(id) {
 
 function renderProducts() {
   $('shopName').textContent = shop.shopName;
-  $('shopMeta').textContent = `${shop.area} · ${shop.ownerName} · ${shop.delivery ? 'Delivery or pickup' : 'Pickup only — order ahead, collect packed'}`;
+  $('shopMeta').textContent = `${shop.area} · ${shop.ownerName} · ${shop.delivery ? 'Delivery or pickup' : 'Pickup only: order ahead, collect packed'}`;
   const byCat = {};
   for (const p of products) (byCat[p.category] ??= []).push(p);
   $('products').innerHTML = Object.entries(byCat).map(([cat, list]) => `
@@ -165,6 +214,7 @@ function addToCart(id, d) {
   const next = Math.max(0, (cart[id] || 0) + d);
   if (p.left && next > p.left) return toast(`Only ${p.left} left`);
   if (next) cart[id] = next; else delete cart[id];
+  checkoutKey = null; // cart changed: a new order, so a new idempotency key
   renderProducts();
 }
 
@@ -179,6 +229,7 @@ function renderCartBar() {
 }
 
 function renderCheckout() {
+  checkoutKey ??= newKey();
   $('coShop').textContent = shop.shopName;
   $('coLines').innerHTML = cartLines().map((l) => `<tr><td>${esc(l.name)}</td><td class="num">${l.qty} × ${rupees(l.price)}</td><td class="num">${rupees(l.qty * l.price)}</td></tr>`).join('');
   $('coTotal').textContent = rupees(cartTotal());
@@ -188,51 +239,104 @@ function renderCheckout() {
 }
 
 function syncCheckout() {
-  $('address').classList.toggle('hidden', document.querySelector('input[name=ful]:checked').value !== 'delivery');
+  $('addrBox').classList.toggle('hidden', document.querySelector('input[name=ful]:checked').value !== 'delivery');
+}
+
+function useMyLocation() {
+  if (!navigator.geolocation) return toast('Location not available on this device');
+  $('locNote').textContent = 'Finding you…';
+  navigator.geolocation.getCurrentPosition(
+    (pos) => { myLocation = { lat: pos.coords.latitude, lng: pos.coords.longitude }; $('locNote').textContent = '✓ Location added'; },
+    () => { $('locNote').textContent = 'Could not get location. We\'ll use your area.'; },
+    { enableHighAccuracy: true, timeout: 10000 });
 }
 
 async function placeOrder() {
   const btn = $('placeBtn');
   btn.disabled = true;
   try {
-    const r = await api('/api/orders', { ...auth(), body: {
+    const r = await call('/api/orders', { body: {
+      idempotencyKey: checkoutKey,
       shopId: shop.id,
       items: Object.entries(cart).map(([productId, qty]) => ({ productId, qty })),
       fulfilment: document.querySelector('input[name=ful]:checked').value,
       address: $('address').value.trim(),
+      location: myLocation,
       paymentMethod: document.querySelector('input[name=pay]:checked').value,
     } });
-    cart = {};
-    toast('Order placed! The shop has been notified.');
-    if (r.paymentLink) openPayment(r.paymentLink, '/customer.html?orders=1');
+    cart = {}; checkoutKey = null;
+    toast(r.duplicate ? 'Already sent. Here is your order.' : 'Order sent! Waiting for the shop to confirm.');
     show('orders');
-  } catch (err) {
-    if (err.status === 401) logout();
   } finally { btn.disabled = false; }
 }
 
-const STEPS = { pickup: ['placed', 'accepted', 'ready', 'completed'], delivery: ['placed', 'accepted', 'out_for_delivery', 'completed'] };
-const STEP_LABEL = { placed: 'Sent to shop', accepted: 'Packing', ready: 'Ready for pickup', out_for_delivery: 'On the way', completed: 'Done' };
+const STEP_LABEL = { placed: 'Waiting for shop to confirm', confirmed: 'Confirmed: packing', packed: 'Packed', out_for_delivery: 'On the way', completed: 'Done', cancelled: 'Cancelled' };
+const stepsFor = (o) => o.fulfilment === 'delivery' ? ['placed', 'confirmed', 'packed', 'out_for_delivery', 'completed'] : ['placed', 'confirmed', 'packed', 'completed'];
+const statusText = (o) => o.status === 'packed' && o.fulfilment === 'pickup' ? 'Packed: ready for pickup' : o.status === 'completed' ? (o.fulfilment === 'delivery' ? 'Delivered' : 'Picked up') : STEP_LABEL[o.status];
+const payText = (o) => ({ paid: 'Paid', claimed: 'Payment sent, shop checking', on_khata: 'On khata' }[o.paymentStatus]
+  || (o.paymentMethod === 'pay_at_shop' ? (o.fulfilment === 'delivery' ? 'Pay on delivery' : 'Pay at pickup') : o.paymentMethod === 'online' ? (o.status === 'placed' ? 'Pay after shop confirms' : 'Payment due') : 'Waiting for shop'));
 
 async function loadOrders() {
-  let orders;
-  try { orders = await api('/api/customers/me/orders', auth()); } catch (err) { if (err.status === 401) logout(); return; }
-  $('orders').innerHTML = orders.map((o) => `
-    <div class="card">
-      <div class="row"><strong class="grow">${esc(o.shopName)}</strong><span class="badge ${o.status}">${esc(STEP_LABEL[o.status] || label(o.status))}</span></div>
-      <div class="muted">${when(o.at)} · ${o.fulfilment === 'delivery' ? 'Delivery' : 'Pickup'} · ${o.items.map((l) => `${esc(l.name)} ×${l.qty}`).join(', ')}</div>
-      ${o.status !== 'cancelled' ? `<div class="muted" style="margin:6px 0">${STEPS[o.fulfilment].map((s) => STEPS[o.fulfilment].indexOf(s) <= STEPS[o.fulfilment].indexOf(o.status) ? `<strong>${STEP_LABEL[s]}</strong>` : STEP_LABEL[s]).join(' → ')}</div>` : ''}
-      <div class="row"><strong class="grow">${rupees(o.total)}</strong>
-        <span class="badge ${o.paymentStatus}">${o.paymentStatus === 'on_khata' ? 'on khata' : label(o.paymentMethod === 'pay_at_shop' && o.paymentStatus === 'pending' ? 'pay at shop' : o.paymentStatus)}</span>
-        ${o.paymentLink && o.status !== 'cancelled' ? `<button class="small" onclick="openPayment('${esc(o.paymentLink)}', '/customer.html?orders=1')">Pay now</button>` : ''}
+  const orders = await call('/api/customers/me/orders');
+  $('orders').innerHTML = orders.map((o) => {
+    const steps = stepsFor(o), at = steps.indexOf(o.status);
+    return `<div class="card">
+      <div class="row"><strong class="grow">${esc(o.shopName)}</strong><span class="badge ${o.status}">${esc(statusText(o))}</span></div>
+      <div class="muted">${when(o.at)} · #${o.id} · ${o.fulfilment === 'delivery' ? 'Delivery' : 'Pickup'} · ${o.items.map((l) => `${esc(l.name)} ×${l.qty}`).join(', ')}</div>
+      ${o.status !== 'cancelled' ? `<div class="muted" style="margin:6px 0">${steps.map((s, i) => i <= at ? `<strong>${statusText({ ...o, status: s })}</strong>` : statusText({ ...o, status: s })).join(' → ')}</div>` : ''}
+      <div class="row"><strong class="grow">${rupees(o.total)} <span class="badge ${o.paymentStatus}">${esc(payText(o))}</span></strong>
+        ${o.paymentLink && o.status !== 'cancelled' ? `<button class="small" onclick="openPayment('${esc(o.paymentLink)}', '/customer.html?orders=1')">Pay ${rupees(o.total)}</button>` : ''}
+        ${o.status === 'out_for_delivery' ? `<button class="small" onclick="track('${o.id}')">🛵 Track live</button>` : ''}
+        <a href="${esc(waUrl(o.shopPhone, `Hi ${o.shopName}, about my order #${o.id} (${rupees(o.total)})`))}" target="_blank"><button class="small secondary">WhatsApp shop</button></a>
         ${o.status === 'placed' ? `<button class="small secondary" onclick="cancelOrder('${o.id}')">Cancel</button>` : ''}</div>
-    </div>`).join('') || '<p class="muted">No orders yet.</p>';
+    </div>`;
+  }).join('') || '<p class="muted">No orders yet.</p>';
 }
 
-async function cancelOrder(id) { await api(`/api/orders/${id}/cancel`, { ...auth(), body: {} }); loadOrders(); }
+async function cancelOrder(id) {
+  if (!confirm('Cancel this order?')) return;
+  await call(`/api/orders/${id}/cancel`, { body: {} });
+  loadOrders();
+}
+
+// ---- live tracking (Leaflet + OpenStreetMap) ----
+let map, layers = {}, trackTimer, fitted;
+const pin = (emoji) => L.divIcon({ html: `<div style="font-size:28px;line-height:28px">${emoji}</div>`, className: '', iconSize: [28, 28], iconAnchor: [14, 14] });
+
+async function track(id) {
+  show('track');
+  if (!map) {
+    map = L.map('map');
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
+  }
+  fitted = false;
+  Object.values(layers).forEach((l) => l.remove());
+  layers = {};
+  const tick = async () => {
+    const o = await call(`/api/orders/${id}/track`);
+    $('trTitle').textContent = o.shopName;
+    $('trStatus').textContent = statusText(o); $('trStatus').className = 'badge ' + o.status;
+    const seen = o.rider?.at ? Math.round((Date.now() - Date.parse(o.rider.at)) / 1000) : null;
+    $('trMeta').textContent = o.rider ? `${o.rider.name} is bringing your order · last update ${seen < 60 ? seen + 's' : Math.round(seen / 60) + ' min'} ago` : 'Waiting for a delivery partner';
+    $('trActions').innerHTML = o.rider ? `<a href="tel:${esc(o.rider.phone)}"><button class="small secondary">📞 Call ${esc(o.rider.name)}</button></a>
+      <a href="${esc(waUrl(o.rider.phone, `Hi ${o.rider.name}, I'm waiting for order #${o.id}`))}" target="_blank"><button class="small secondary">WhatsApp</button></a>` : '';
+    const points = { shop: [o.shopLocation, '🏪'], home: [o.location, '🏠'], rider: [o.rider?.lat && o.rider, '🛵'] };
+    for (const [k, [p, emoji]] of Object.entries(points)) {
+      if (!p) continue;
+      layers[k] ??= L.marker([p.lat, p.lng], { icon: pin(emoji) }).addTo(map);
+      layers[k].setLatLng([p.lat, p.lng]);
+    }
+    if (!fitted) { map.fitBounds(Object.values(points).filter(([p]) => p).map(([p]) => [p.lat, p.lng]), { padding: [40, 40], maxZoom: 16 }); fitted = true; }
+    if (o.status !== 'out_for_delivery') stopTracking();
+  };
+  setTimeout(() => map.invalidateSize(), 50);
+  await tick();
+  trackTimer = setInterval(() => tick().catch(() => {}), 4000);
+}
+function stopTracking() { clearInterval(trackTimer); trackTimer = null; }
 
 init();
-setInterval(() => !$('v-orders').classList.contains('hidden') && loadOrders(), 10000);
+setInterval(() => !$('v-orders').classList.contains('hidden') && loadOrders().catch(() => {}), 10000);
 </script>
 </body>
 </html>

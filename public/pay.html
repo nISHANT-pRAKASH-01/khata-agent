@@ -3,17 +3,22 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Payment — Khata Agent</title>
+<title>Pay — Khata Agent</title>
 <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
 <main>
-  <div class="card" style="max-width:420px;margin:40px auto;text-align:center">
-    <p class="badge pending">Test mode: Pine Labs keys not connected</p>
-    <h2 id="desc" style="margin-top:12px"></h2>
+  <div class="card" style="max-width:420px;margin:24px auto;text-align:center">
+    <h2 id="desc"></h2>
     <div class="stat" id="amount"></div>
+    <div id="payBox">
+      <p class="muted">Scan with any UPI app (PhonePe, GPay, Paytm) and pay exactly this amount.</p>
+      <img src="/upi-qr.jpg" alt="UPI QR code" style="width:100%;max-width:300px;border-radius:12px">
+      <label style="text-align:left">After paying, enter the UPI reference / UTR number from your app</label>
+      <input id="utr" placeholder="e.g. 412345678901" autocomplete="off">
+      <button class="block" id="payBtn" style="margin-top:8px" onclick="claim()">I've paid</button>
+    </div>
     <p class="muted" id="status"></p>
-    <button class="block" id="payBtn" onclick="pay()">Simulate successful payment</button>
     <p><a id="back" href="/">← Back</a></p>
   </div>
 </main>
@@ -28,15 +33,21 @@ async function load() {
   const p = await api('/api/payments/' + encodeURIComponent(pid));
   $('desc').textContent = p.description;
   $('amount').textContent = rupees(p.amount);
-  $('status').textContent = p.status === 'paid' ? 'Paid ✓' : 'Waiting for payment';
-  $('payBtn').classList.toggle('hidden', p.status === 'paid');
+  $('payBox').classList.toggle('hidden', p.status !== 'pending');
+  $('status').textContent = {
+    paid: 'Paid ✓',
+    claimed: p.kind === 'plan' ? 'Thanks! Your plan is active. We will verify the UTR.' : 'Thanks! The shop will confirm once the money reaches them.',
+    pending: '',
+  }[p.status];
 }
 
-async function pay() {
-  await api(`/api/payments/${encodeURIComponent(pid)}/test-pay`, { body: {} });
-  toast('Payment received');
-  await load();
-  setTimeout(() => { location.href = $('back').href; }, 1200);
+async function claim() {
+  $('payBtn').disabled = true;
+  try {
+    await api(`/api/payments/${encodeURIComponent(pid)}/claim`, { body: { utr: $('utr').value.trim() } });
+    await load();
+    setTimeout(() => { location.href = $('back').href; }, 1800);
+  } finally { $('payBtn').disabled = false; }
 }
 
 load();

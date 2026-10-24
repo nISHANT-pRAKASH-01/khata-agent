@@ -29,6 +29,13 @@ const CATALOG = {
   ],
 };
 
+// Rough centres of each demo area (Bengaluru), used for shop pins and as a delivery fallback.
+export const AREA_CENTERS = {
+  Indiranagar: { lat: 12.9719, lng: 77.6412 },
+  Koramangala: { lat: 12.9352, lng: 77.6245 },
+  'HSR Layout': { lat: 12.9116, lng: 77.6474 },
+};
+
 const SHOPS = [
   { shopName: 'Sharma General Store', ownerName: 'Rakesh Sharma', phone: '9810000001', area: 'Indiranagar', category: 'kirana', plan: 'premium' },
   { shopName: 'Gupta Kirana', ownerName: 'Sunita Gupta', phone: '9810000002', area: 'Koramangala', category: 'kirana', plan: 'day' },
@@ -37,21 +44,24 @@ const SHOPS = [
   { shopName: 'Balaji Provisions', ownerName: 'Venkat Rao', phone: '9810000005', area: 'HSR Layout', category: 'kirana', plan: 'day' },
 ];
 
+// [name, phone, usual ordering hour in IST] — gives the timing agent a real pattern to find.
 const CUSTOMERS = [
-  ['Ramesh', '9900000011'], ['Priya', '9900000012'], ['Arjun', '9900000013'],
-  ['Meena', '9900000014'], ['Farhan', '9900000015'], ['Kavya', '9900000016'],
+  ['Ramesh', '9900000011', 8], ['Priya', '9900000012', 19], ['Arjun', '9900000013', 21],
+  ['Meena', '9900000014', 10], ['Farhan', '9900000015', 18], ['Kavya', '9900000016', 20],
 ];
 
-export function seed({ id, endOfDayIST }) {
+export function seed({ id, endOfDayIST, istMidnight }) {
   const now = Date.now();
   const db = { shops: [], customers: [], products: [], orders: [], payments: [], stockMoves: [], views: [], entries: [], reminders: [], logs: [] };
+  const jitter = () => (rand() - 0.5) * 0.02;
 
-  for (const c of CUSTOMERS) db.customers.push({ id: id(), name: c[0], phone: c[1], area: pick(SHOPS).area, mock: true, at: new Date(now - 40 * DAY).toISOString() });
+  for (const c of CUSTOMERS) db.customers.push({ id: id(), name: c[0], phone: c[1], prefHour: c[2], area: pick(SHOPS).area, mock: true, at: new Date(now - 40 * DAY).toISOString() });
 
   for (const sh of SHOPS) {
     const validUntil = sh.plan === 'premium' ? new Date(now + 30 * DAY) : endOfDayIST(new Date(now));
     const shop = {
       id: id(), shopName: sh.shopName, ownerName: sh.ownerName, phone: sh.phone, pin: '1234', area: sh.area, category: sh.category,
+      lat: AREA_CENTERS[sh.area].lat + jitter(), lng: AREA_CENTERS[sh.area].lng + jitter(),
       plan: { type: sh.plan, validUntil: validUntil.toISOString() }, mock: true, at: new Date(now - 45 * DAY).toISOString(),
     };
     db.shops.push(shop);
@@ -66,7 +76,9 @@ export function seed({ id, endOfDayIST }) {
     // Past orders (online + walk-in) so the premium insights have history.
     const nOrders = sh.plan === 'premium' ? 70 : 15;
     for (let i = 0; i < nOrders; i++) {
-      const at = new Date(now - Math.floor(rand() * 30 * DAY));
+      const cust = pick(db.customers);
+      const hour = cust.prefHour + (rand() < 0.7 ? 0 : Math.round((rand() - 0.5) * 4)) + rand();
+      const at = new Date(Math.min(now - 60000, istMidnight(now - Math.floor(1 + rand() * 29) * DAY) + hour * 3600000));
       const lines = [];
       for (let j = 0, n = 1 + Math.floor(rand() * 3); j < n; j++) {
         // Skew towards the first few products so "top sellers" is meaningful.
@@ -74,11 +86,10 @@ export function seed({ id, endOfDayIST }) {
         if (lines.some((l) => l.productId === p.id)) continue;
         lines.push({ productId: p.id, name: p.name, price: p.price, qty: 1 + Math.floor(rand() * 3) });
       }
-      const cust = pick(db.customers);
       const walkIn = rand() < 0.4;
       db.orders.push({
         id: id(), shopId: shop.id, channel: walkIn ? 'walk_in' : 'online',
-        customerId: walkIn ? null : cust.id, customerName: cust.name, customerPhone: cust.phone,
+        customerId: cust.id, customerName: cust.name, customerPhone: cust.phone,
         items: lines, total: lines.reduce((t, l) => t + l.price * l.qty, 0),
         fulfilment: walkIn ? 'counter' : (sh.plan === 'premium' && rand() < 0.5 ? 'delivery' : 'pickup'),
         paymentMethod: pick(['online', 'pay_at_shop', 'khata']), paymentStatus: 'paid', status: 'completed',

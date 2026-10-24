@@ -36,6 +36,33 @@ async function api(path, { method, body, headers } = {}) {
   return data;
 }
 
+// One key per user action, so a retried request can't apply twice on the server.
+const newKey = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2, 12));
+
+const waUrl = (phone, text) => `https://wa.me/${String(phone || '').replace(/\D/g, '').replace(/^(\d{10})$/, '91$1')}?text=${encodeURIComponent(text)}`;
+const hourLabel = (h) => { const f = (x) => `${((x + 11) % 12) + 1} ${x % 24 < 12 ? 'AM' : 'PM'}`; return `${f(h)}–${f(h + 1)}`; };
+
+// "Sign in with Google" when a client ID is configured; otherwise a labelled demo email login.
+async function mountSignIn(el, role, onToken) {
+  const cfg = await api('/api/config');
+  const finish = async (body) => onToken(await api('/api/auth/google', { body: { ...body, role } }));
+  if (cfg.googleClientId) {
+    const s = document.createElement('script');
+    s.src = 'https://accounts.google.com/gsi/client';
+    s.onload = () => {
+      google.accounts.id.initialize({ client_id: cfg.googleClientId, callback: (r) => finish({ credential: r.credential }) });
+      google.accounts.id.renderButton(el, { theme: 'outline', size: 'large', text: 'continue_with', shape: 'pill' });
+    };
+    document.head.appendChild(s);
+    return;
+  }
+  el.innerHTML = `<p class="badge pending">Demo mode: Google sign-in not configured yet</p>
+    <label>Gmail address</label><input id="demoEmail" type="email" placeholder="you@gmail.com">
+    <label>Your name</label><input id="demoName">
+    <button class="block" style="margin-top:8px" id="demoGo">Continue</button>`;
+  $('demoGo').onclick = () => finish({ demoEmail: $('demoEmail').value.trim(), demoName: $('demoName').value.trim() });
+}
+
 // Opens a payment link: Pine Labs in a new tab, the test page in the same tab.
 function openPayment(link, back = location.pathname) {
   if (!link) return;

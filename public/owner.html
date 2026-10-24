@@ -13,30 +13,30 @@
   <button class="ghost small hidden" id="logoutBtn" onclick="logout()">Log out</button>
 </div></header>
 <main>
-  <!-- Login / signup -->
+  <!-- Sign in / register -->
   <section id="v-auth" class="hidden">
-    <div class="grid two" style="margin-top:16px">
-      <div class="card">
-        <h2>Log in</h2>
-        <label>Phone</label><input id="liPhone" inputmode="numeric" maxlength="10">
-        <label>4-digit PIN</label><input id="liPin" type="password" inputmode="numeric" maxlength="4">
-        <button class="block" style="margin-top:12px" onclick="login()">Log in</button>
-        <p class="muted">Demo shop: 9810000001 / 1234 (Premium) or 9810000002 / 1234 (Day pass)</p>
+    <div class="card" style="max-width:440px;margin:24px auto" id="signinCard">
+      <h2>Shop owner sign in</h2>
+      <p class="muted">Sign in with the Gmail where you want order alerts.</p>
+      <div id="signin"></div>
+      <details style="margin-top:16px"><summary class="muted">Try a demo shop</summary>
+        <label>Demo shop phone</label><input id="liPhone" inputmode="numeric" maxlength="10" value="9810000001">
+        <label>PIN</label><input id="liPin" type="password" inputmode="numeric" maxlength="4" value="1234">
+        <button class="block secondary" style="margin-top:8px" onclick="demoLogin()">Open demo shop</button>
+        <p class="muted">9810000001 is Premium, 9810000002 is on a Day pass. PIN 1234.</p>
+      </details>
+    </div>
+    <div class="card hidden" style="max-width:520px;margin:24px auto" id="registerCard">
+      <h2>Register your shop</h2>
+      <p class="muted" id="regWho"></p>
+      <label>Shop name</label><input id="suShop">
+      <div class="row">
+        <div class="grow"><label>Area</label><input id="suArea" list="areas" placeholder="e.g. Indiranagar"><datalist id="areas"></datalist></div>
+        <div class="grow"><label>Type</label><select id="suCat"><option value="kirana">Kirana</option><option value="fresh">Fruits &amp; veg</option><option value="medical">Medical</option><option value="other">Other</option></select></div>
       </div>
-      <div class="card">
-        <h2>Register your shop</h2>
-        <label>Your name</label><input id="suOwner">
-        <label>Shop name</label><input id="suShop">
-        <div class="row">
-          <div class="grow"><label>Area</label><input id="suArea" list="areas" placeholder="e.g. Indiranagar"><datalist id="areas"></datalist></div>
-          <div class="grow"><label>Type</label><select id="suCat"><option value="kirana">Kirana</option><option value="fresh">Fruits &amp; veg</option><option value="medical">Medical</option><option value="other">Other</option></select></div>
-        </div>
-        <div class="row">
-          <div class="grow"><label>Phone</label><input id="suPhone" inputmode="numeric" maxlength="10"></div>
-          <div class="grow"><label>Choose a 4-digit PIN</label><input id="suPin" type="password" inputmode="numeric" maxlength="4"></div>
-        </div>
-        <button class="block" style="margin-top:12px" onclick="signup()">Register</button>
-      </div>
+      <label>Shop phone (WhatsApp)</label><input id="suPhone" inputmode="numeric" maxlength="10">
+      <button class="small secondary" style="margin-top:6px" onclick="pinShop()">📍 I'm at my shop: use this location</button> <span class="muted" id="suLoc"></span>
+      <button class="block" style="margin-top:12px" onclick="signup()">Register shop</button>
     </div>
   </section>
 
@@ -47,6 +47,7 @@
       <button data-tab="orders">Orders<span class="count hidden" id="cOrders"></span></button>
       <button data-tab="inventory">Inventory<span class="count hidden" id="cLow"></span></button>
       <button data-tab="billing">Billing</button>
+      <button data-tab="customers">Customers</button>
       <button data-tab="khata">Khata &amp; agent</button>
       <button data-tab="insights">Insights</button>
       <button data-tab="plan">Plan</button>
@@ -93,13 +94,18 @@
           </div>
           <div class="row" style="margin-top:8px">
             <button class="grow" onclick="bill('cash')">Cash</button>
-            <button class="grow secondary" onclick="bill('online')">Pine Labs link</button>
+            <button class="grow secondary" onclick="bill('online')">UPI QR</button>
             <button class="grow secondary" onclick="bill('khata')">On khata</button>
           </div>
           <p class="muted">Stock goes down as soon as you bill.</p>
           <div id="billResult"></div>
         </div>
       </div>
+    </div>
+
+    <div id="t-customers" class="tab">
+      <p class="muted" style="margin-top:12px">Everyone who has ordered from your shop: what they buy and when they usually order.</p>
+      <div id="customers"></div>
     </div>
 
     <div id="t-khata" class="tab">
@@ -137,7 +143,7 @@
         <div class="card plan">
           <h3>Day pass</h3>
           <div class="price">₹100 <span class="muted">/ day</span></div>
-          <ul class="muted"><li>Listed in your area until midnight</li><li>Pickup orders: customers order, you pack, they walk in</li><li>Inventory, billing, khata, AI munshi</li></ul>
+          <ul class="muted"><li>Listed in your area until midnight</li><li>Pickup orders: customers order, you confirm and pack, they walk in</li><li>Inventory, billing, khata, AI munshi</li></ul>
           <button class="block" id="buyDay" onclick="buyPlan('day')">Go live today for ₹100</button>
         </div>
         <div class="card plan best">
@@ -160,14 +166,29 @@ const call = async (path, opts) => {
 };
 
 // ---- auth ----
-async function login() {
-  const r = await api('/api/owner/login', { body: { phone: $('liPhone').value.trim(), pin: $('liPin').value.trim() } });
+let ticket = null, shopPin = null;
+function onSignedIn(r) {
+  if (r.needsShop) {
+    ticket = r.ticket;
+    $('regWho').textContent = `Signed in as ${r.name} (${r.email})`;
+    $('signinCard').classList.add('hidden'); $('registerCard').classList.remove('hidden');
+    return;
+  }
   token = r.token; store.set('ownerToken', token); start();
+}
+async function demoLogin() {
+  onSignedIn(await api('/api/owner/demo-login', { body: { phone: $('liPhone').value.trim(), pin: $('liPin').value.trim() } }));
+}
+function pinShop() {
+  if (!navigator.geolocation) return toast('Location not available');
+  $('suLoc').textContent = 'Finding you…';
+  navigator.geolocation.getCurrentPosition((p) => { shopPin = { lat: p.coords.latitude, lng: p.coords.longitude }; $('suLoc').textContent = '✓ Pinned'; },
+    () => { $('suLoc').textContent = 'Could not get location; we\'ll use your area.'; }, { enableHighAccuracy: true, timeout: 10000 });
 }
 async function signup() {
   const r = await api('/api/owner/signup', { body: {
-    ownerName: $('suOwner').value.trim(), shopName: $('suShop').value.trim(), area: $('suArea').value.trim(),
-    category: $('suCat').value, phone: $('suPhone').value.trim(), pin: $('suPin').value.trim(),
+    ticket, shopName: $('suShop').value.trim(), area: $('suArea').value.trim(),
+    category: $('suCat').value, phone: $('suPhone').value.trim(), location: shopPin,
   } });
   token = r.token; store.set('ownerToken', token); tab = 'plan'; start();
 }
@@ -175,9 +196,12 @@ function logout() { store.set('ownerToken', null); token = me = null; showAuth()
 
 async function showAuth() {
   $('v-auth').classList.remove('hidden'); $('v-app').classList.add('hidden');
+  $('signinCard').classList.remove('hidden'); $('registerCard').classList.add('hidden');
   $('who').textContent = ''; $('logoutBtn').classList.add('hidden');
   const areas = await api('/api/areas');
   $('areas').innerHTML = areas.map((a) => `<option value="${esc(a)}">`).join('');
+  $('signin').innerHTML = '';
+  mountSignIn($('signin'), 'owner', onSignedIn);
 }
 
 async function start() {
@@ -192,10 +216,10 @@ async function refreshMe() {
   const r = await call('/api/owner/me');
   me = r.shop;
   $('who').textContent = me.shopName;
-  $('cOrders').textContent = r.openOrders; $('cOrders').classList.toggle('hidden', !r.openOrders);
+  $('cOrders').textContent = r.toConfirm || r.openOrders; $('cOrders').classList.toggle('hidden', !r.openOrders);
   $('cLow').textContent = r.lowStock; $('cLow').classList.toggle('hidden', !r.lowStock);
-  if (lastOpen !== null && r.openOrders > lastOpen) toast('🔔 New order received');
-  lastOpen = r.openOrders;
+  if (lastOpen !== null && r.toConfirm > lastOpen) toast('🔔 New order: please confirm it');
+  lastOpen = r.toConfirm;
   const until = me.plan && new Date(me.plan.validUntil).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
   $('planBanner').innerHTML = me.planActive
     ? `<div class="row"><div class="grow"><strong>${esc(me.shopName)}</strong> is <span class="badge paid">live</span> on ${me.premium ? '<span class="badge premium">Premium</span>' : 'a Day pass'} until ${until}.
@@ -210,35 +234,74 @@ function setTab(t) {
   tab = t; store.set('ownerTab', t);
   document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('active', b.dataset.tab === t));
   document.querySelectorAll('.tab').forEach((el) => el.classList.toggle('hidden', el.id !== 't-' + t));
-  ({ orders: loadOrders, inventory: loadInventory, billing: loadBilling, khata: loadKhata, insights: loadInsights, plan: () => {} })[t]();
+  ({ orders: loadOrders, inventory: loadInventory, billing: loadBilling, customers: loadCustomers, khata: loadKhata, insights: loadInsights, plan: () => {} })[t]();
 }
 document.querySelectorAll('#tabs button').forEach((b) => b.onclick = () => setTab(b.dataset.tab));
 
 // ---- orders ----
+const STATUS_TEXT = { placed: 'needs your confirmation', confirmed: 'confirmed', packed: 'packed', out_for_delivery: 'out for delivery', completed: 'completed', cancelled: 'cancelled' };
 const ACTIONS = {
-  placed: (o) => [['accepted', o.paymentMethod === 'khata' ? 'Accept & give credit' : 'Accept & pack'], ['cancelled', 'Reject']],
-  accepted: (o) => [o.fulfilment === 'delivery' ? ['out_for_delivery', 'Out for delivery'] : ['ready', 'Packed: ready for pickup'], ['cancelled', 'Cancel']],
-  ready: () => [['completed', 'Picked up']],
+  placed: (o) => [['confirmed', o.paymentMethod === 'khata' ? 'Confirm & give credit' : 'Confirm order'], ['cancelled', 'Reject']],
+  confirmed: () => [['packed', 'Mark packed'], ['cancelled', 'Cancel']],
+  packed: (o) => o.fulfilment === 'delivery' ? [['out_for_delivery', 'Send with rider']] : [['completed', 'Customer picked up']],
   out_for_delivery: () => [['completed', 'Delivered']],
 };
+// What the customer would want to hear at each step, ready to send on WhatsApp.
+const waText = (o) => ({
+  placed: `Namaste ${o.customerName}, we got your order #${o.id} (${rupees(o.total)}). Confirming shortly. - ${me.shopName}`,
+  confirmed: `Namaste ${o.customerName}, your order #${o.id} is confirmed and being packed. - ${me.shopName}`,
+  packed: o.fulfilment === 'delivery' ? `Your order #${o.id} is packed and leaving soon. - ${me.shopName}` : `Your order #${o.id} is packed and ready. Please come and collect it. - ${me.shopName}`,
+  out_for_delivery: `Your order #${o.id} is on the way with ${o.rider?.name}. Track live: ${location.origin}/customer.html?track=${o.id} - ${me.shopName}`,
+  completed: `Thank you for shopping with ${me.shopName}! 🙏`,
+  cancelled: `Sorry ${o.customerName}, we couldn't take order #${o.id} this time. - ${me.shopName}`,
+}[o.status]);
+const payBadge = (o) => o.paymentStatus === 'claimed' ? `customer says paid${o.utr ? ' · UTR ' + esc(o.utr) : ''}` : o.paymentStatus === 'pending' ? label(o.paymentMethod) + ' · unpaid' : label(o.paymentStatus);
+
 async function loadOrders() {
   const all = await call('/api/owner/orders');
-  const list = $('showAll').checked ? all : all.filter((o) => ACTIONS[o.status]);
+  const list = $('showAll').checked ? all : all.filter((o) => ACTIONS[o.status] || o.paymentStatus === 'claimed');
   $('orders').innerHTML = list.map((o) => `
-    <div class="card">
+    <div class="card" ${o.status === 'placed' ? 'style="border-color:var(--brand)"' : ''}>
       <div class="row"><strong class="grow">${esc(o.customerName)} <span class="muted">${esc(o.customerPhone || '')}</span></strong>
         <span class="badge">${o.channel === 'walk_in' ? 'Counter' : o.fulfilment === 'delivery' ? '🛵 Delivery' : '🛍️ Pickup'}</span>
-        <span class="badge ${o.status}">${label(o.status)}</span></div>
+        <span class="badge ${o.status}">${STATUS_TEXT[o.status]}</span></div>
       <div class="muted">${when(o.at)} · #${o.id}${o.address ? ' · ' + esc(o.address) : ''}</div>
       <div style="margin:6px 0">${o.items.map((l) => `${esc(l.name)} × ${l.qty}`).join(' · ')}</div>
-      <div class="row"><strong class="grow">${rupees(o.total)} <span class="badge ${o.paymentStatus}">${o.paymentStatus === 'pending' ? label(o.paymentMethod) + ' · unpaid' : label(o.paymentStatus)}</span></strong>
-        ${(ACTIONS[o.status]?.(o) || []).map(([s, t]) => `<button class="small ${s === 'cancelled' ? 'secondary' : ''}" onclick="setStatus('${o.id}','${s}')">${t}</button>`).join('')}</div>
-    </div>`).join('') || '<p class="muted">No open orders right now. New orders show up here automatically.</p>';
+      ${o.rider ? `<div class="muted">Rider: ${esc(o.rider.name)} (${esc(o.rider.phone)}) ·
+        <a href="${esc(waUrl(o.rider.phone, `Delivery for ${me.shopName}, order #${o.id}. Open this and keep it open while riding: ${location.origin}${o.rider.link}`))}" target="_blank">send rider link</a> ·
+        <a href="${esc(o.rider.link)}" target="_blank">open rider page</a></div>` : ''}
+      ${o.status === 'packed' && o.fulfilment === 'delivery' ? `<div class="row"><input id="rn-${o.id}" class="grow" placeholder="Rider name"><input id="rp-${o.id}" class="grow" placeholder="Rider phone" inputmode="numeric" maxlength="10"></div>` : ''}
+      <div class="row" style="margin-top:6px"><strong class="grow">${rupees(o.total)} <span class="badge ${o.paymentStatus}">${payBadge(o)}</span></strong>
+        ${['claimed', 'pending'].includes(o.paymentStatus) && o.paymentMethod !== 'khata' && o.status !== 'cancelled' && o.status !== 'placed' ? `<button class="small secondary" onclick="paymentReceived('${o.id}')">Money received</button>` : ''}
+        ${o.customerPhone && waText(o) ? `<a href="${esc(waUrl(o.customerPhone, waText(o)))}" target="_blank"><button class="small secondary">WhatsApp update</button></a>` : ''}
+        ${(ACTIONS[o.status]?.(o) || []).map(([st, t]) => `<button class="small ${st === 'cancelled' ? 'secondary' : ''}" onclick="setStatus('${o.id}','${st}')">${t}</button>`).join('')}</div>
+    </div>`).join('') || '<p class="muted">No open orders right now. New orders show up here automatically, and you get an email.</p>';
 }
 async function setStatus(id, status) {
   if (status === 'cancelled' && !confirm('Cancel this order? Stock will be put back.')) return;
-  await call(`/api/owner/orders/${id}/status`, { body: { status } });
+  const body = { status };
+  if (status === 'out_for_delivery') body.rider = { name: $('rn-' + id).value.trim(), phone: $('rp-' + id).value.trim() };
+  await call(`/api/owner/orders/${id}/status`, { body });
   refreshMe(); loadOrders();
+}
+async function paymentReceived(id) {
+  if (!confirm('Did the money reach your account?')) return;
+  await call(`/api/owner/orders/${id}/payment-received`, { body: {} });
+  loadOrders();
+}
+
+// ---- customers ----
+async function loadCustomers() {
+  const list = await call('/api/owner/customers');
+  $('customers').innerHTML = list.map((c) => `
+    <div class="card">
+      <div class="row"><strong class="grow">${esc(c.name)} <span class="muted">${esc(c.phone)}${c.email ? ' · ' + esc(c.email) : ''}</span></strong>
+        ${c.khata > 0 ? `<span class="badge on_khata">owes ${rupees(c.khata)}</span>` : ''}</div>
+      <div class="muted">${c.orders} order${c.orders === 1 ? '' : 's'} · ${rupees(c.spend)} spent · last ${when(c.lastOrderAt)}</div>
+      <div style="margin:6px 0">Usually orders <strong>${hourLabel(c.usualHour)}</strong> <span class="muted">(${c.usualHourShare}% of orders)</span></div>
+      <div class="muted">Buys most: ${c.favourites.map((f) => `${esc(f.name)} ×${f.qty}`).join(', ')}</div>
+      <a href="${esc(waUrl(c.phone, `Namaste ${c.name}, ${me.shopName} here!`))}" target="_blank"><button class="small secondary" style="margin-top:6px">WhatsApp</button></a>
+    </div>`).join('') || '<p class="muted">No customers yet. They show up here after their first order.</p>';
 }
 
 // ---- inventory ----
@@ -253,7 +316,7 @@ async function loadInventory() {
 }
 async function restock(id) {
   const qty = Number($('rs-' + id).value);
-  const p = await call(`/api/owner/products/${id}/restock`, { body: { qty } });
+  const p = await call(`/api/owner/products/${id}/restock`, { body: { qty, idempotencyKey: newKey() } });
   toast(`${p.name}: now ${p.stock} in stock`);
   refreshMe(); loadInventory();
 }
@@ -274,6 +337,7 @@ async function addProduct() {
 }
 
 // ---- walk-in billing ----
+let billKey = null;
 async function loadBilling() { products = await call('/api/owner/products'); renderBillPicker(); renderBill(); }
 function renderBillPicker() {
   const q = $('billSearch').value.toLowerCase();
@@ -285,6 +349,7 @@ function billAdd(id, d) {
   const p = products.find((x) => x.id === id);
   const n = Math.min(p.stock, Math.max(0, (billCart[id] || 0) + d));
   if (n) billCart[id] = n; else delete billCart[id];
+  billKey = null; // bill changed: next submit is a new bill
   renderBillPicker(); renderBill();
 }
 function renderBill() {
@@ -295,24 +360,25 @@ function renderBill() {
   $('billTotal').textContent = rupees(lines.reduce((t, l) => t + l.qty * l.price, 0));
 }
 async function bill(paymentMethod) {
+  billKey ??= newKey();
   const r = await call('/api/owner/bills', { body: {
+    idempotencyKey: billKey,
     items: Object.entries(billCart).map(([productId, qty]) => ({ productId, qty })),
     customerName: $('bName').value.trim(), customerPhone: $('bPhone').value.trim(), paymentMethod,
   } });
-  billCart = {}; $('bName').value = ''; $('bPhone').value = '';
+  billCart = {}; billKey = null; $('bName').value = ''; $('bPhone').value = '';
   const link = r.paymentLink && (r.paymentLink.startsWith('/') ? location.origin + r.paymentLink : r.paymentLink);
-  const wa = link && r.bill.customerPhone && `https://wa.me/91${r.bill.customerPhone}?text=${encodeURIComponent(`Namaste ${r.bill.customerName}, your bill at ${me.shopName} is ${rupees(r.bill.total)}. Pay here: ${link}`)}`;
+  const wa = link && r.bill.customerPhone && waUrl(r.bill.customerPhone, `Namaste ${r.bill.customerName}, your bill at ${me.shopName} is ${rupees(r.bill.total)}. Pay here: ${link}`);
   $('billResult').innerHTML = `<div class="card"><strong>Billed ${rupees(r.bill.total)}</strong> · ${label(r.bill.paymentStatus)}
     ${link ? `<div class="row" style="margin-top:8px"><a href="${esc(wa)}" target="_blank"><button class="small">Send link on WhatsApp</button></a>
-    <button class="small secondary" onclick="openPayment('${esc(r.paymentLink)}')">Open link</button></div>` : ''}</div>`;
+    <button class="small secondary" onclick="openPayment('${esc(r.paymentLink)}')">Show QR to customer</button></div>` : ''}</div>`;
   toast('Bill saved, stock updated'); refreshMe(); loadBilling();
 }
 
 // ---- khata + agent ----
 function waLink(r) {
-  const phone = r.customerPhone.replace(/\D/g, '').replace(/^(\d{10})$/, '91$1');
   const link = r.paymentLink?.startsWith('/') ? location.origin + r.paymentLink : r.paymentLink;
-  return `https://wa.me/${phone}?text=${encodeURIComponent(`${r.message}\n\nPay here: ${link}`)}`;
+  return waUrl(r.customerPhone, `${r.message}\n\nPay here: ${link}`);
 }
 function reminderHtml(r) {
   const head = `<p><span class="badge ${r.status}">${r.status}</span> <strong>${esc(r.customerName)}</strong> · ${rupees(r.amount)}</p>`;
@@ -366,6 +432,9 @@ async function loadInsights() {
     <div class="card"><h3>Sales, last 14 days</h3>
       <div class="bars">${d.salesByDay.map((x) => `<div title="${x.day}: ${rupees(x.revenue)}" style="height:${(x.revenue / maxDay) * 100}%"></div>`).join('')}</div>
       <div class="bars-x">${d.salesByDay.map((x, i) => `<span>${i % 2 ? '' : x.day.slice(8)}</span>`).join('')}</div></div>
+    <div class="card"><h3>When customers order (30 days, IST)</h3>
+      <div class="bars">${d.ordersByHour.map((n, h) => `<div title="${hourLabel(h)}: ${n} orders" style="height:${(n / Math.max(1, ...d.ordersByHour)) * 100}%"></div>`).join('')}</div>
+      <div class="bars-x">${d.ordersByHour.map((n, h) => `<span>${h % 3 ? '' : h}</span>`).join('')}</div></div>
     <div class="grid two">
       <div class="card"><h3>Top sellers (30 days)</h3>${d.topProducts.map((p) => `
         <div style="margin:8px 0"><div class="row"><span class="grow">${esc(p.name)}</span><span class="muted">${p.qty} sold · ${rupees(p.revenue)}</span></div>
