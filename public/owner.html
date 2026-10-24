@@ -41,7 +41,7 @@
 
     <div style="max-width:880px;margin:8px auto 24px">
       <h2 style="text-align:center">Put your shop online</h2>
-      <p class="muted" style="text-align:center">Create your account above, then pick a plan to go live. Every plan includes inventory, billing, khata and the AI inventory coach.</p>
+      <p class="muted" style="text-align:center">Create your account above, then pick a plan to go live. Every plan includes inventory, billing and the AI inventory coach.</p>
       <div class="grid two">
         <div class="card plan">
           <h3>Day pass</h3>
@@ -49,7 +49,7 @@
           <ul class="muted">
             <li>Listed in your area until midnight</li>
             <li>Customers order ahead; you confirm and pack, they walk in and pick up</li>
-            <li>Inventory, billing, khata, Khata Munshi and the inventory coach</li>
+            <li>Inventory, billing and the AI inventory coach</li>
           </ul>
         </div>
         <div class="card plan best">
@@ -73,7 +73,6 @@
       <button data-tab="inventory">Inventory<span class="count hidden" id="cLow"></span></button>
       <button data-tab="billing">Billing</button>
       <button data-tab="customers">Customers</button>
-      <button data-tab="khata">Khata &amp; agent</button>
       <button data-tab="coach">🎓 Coach</button>
       <button data-tab="insights">Insights</button>
       <button data-tab="plan">Plan</button>
@@ -150,7 +149,6 @@
           <div class="row" style="margin-top:8px">
             <button class="grow" onclick="bill('cash')">Cash</button>
             <button class="grow secondary" onclick="bill('online')">UPI QR</button>
-            <button class="grow secondary" onclick="bill('khata')">On khata</button>
           </div>
           <p class="muted">Stock goes down as soon as you bill.</p>
           <div id="billResult"></div>
@@ -166,41 +164,12 @@
           <option value="spend30">Top spenders (30 days)</option>
           <option value="spend">Top spenders (all time)</option>
           <option value="lastOrderAt">Most recent</option>
-          <option value="khata">Owes the most</option>
         </select>
         <select id="custTier" class="grow" onchange="renderCustomers()">
           <option value="">All customers</option><option value="prime">⭐ Prime only</option><option value="regular">Regular</option><option value="new">New</option>
         </select>
       </div>
       <div id="customers"></div>
-    </div>
-
-    <div id="t-khata" class="tab">
-      <div class="card">
-        <h3>Agent drafts waiting for you</h3>
-        <p class="muted">Khata Munshi (our AgenticOrg agent) checks who owes you and drafts polite reminders. Nothing goes out until you approve it.</p>
-        <button id="runAgentBtn" onclick="runAgent()">Ask Khata Munshi to check dues</button>
-        <div id="reminders"></div>
-      </div>
-      <div class="grid two">
-        <div class="card">
-          <h3>Add udhaar / payment</h3>
-          <div class="row">
-            <input id="kName" class="grow" placeholder="Customer name">
-            <input id="kPhone" class="grow" placeholder="Phone" inputmode="numeric" maxlength="10">
-          </div>
-          <div class="row">
-            <input id="kAmount" class="grow" type="number" min="1" placeholder="Amount ₹">
-            <select id="kType" class="grow"><option value="credit">Took on credit (udhaar)</option><option value="payment">Paid back</option></select>
-          </div>
-          <input id="kNote" placeholder="Note (optional), e.g. rice, oil">
-          <button onclick="addKhata()">Save</button>
-        </div>
-        <div class="card">
-          <h3>Who owes what</h3>
-          <table><tbody id="balances"></tbody></table>
-        </div>
-      </div>
     </div>
 
     <div id="t-coach" class="tab"><div id="coach"></div></div>
@@ -212,7 +181,7 @@
         <div class="card plan">
           <h3>Day pass</h3>
           <div class="price">₹100 <span class="muted">/ day</span></div>
-          <ul class="muted"><li>Listed in your area until midnight</li><li>Pickup orders: customers order, you confirm and pack, they walk in</li><li>Inventory, billing, khata, AI munshi</li></ul>
+          <ul class="muted"><li>Listed in your area until midnight</li><li>Pickup orders: customers order, you confirm and pack, they walk in</li><li>Inventory, billing and the AI inventory coach</li></ul>
           <button class="block" id="buyDay" onclick="buyPlan('day')">Go live today for ₹100</button>
         </div>
         <div class="card plan best">
@@ -304,14 +273,14 @@ function setTab(t) {
   tab = t; store.set('ownerTab', t);
   document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('active', b.dataset.tab === t));
   document.querySelectorAll('.tab').forEach((el) => el.classList.toggle('hidden', el.id !== 't-' + t));
-  ({ orders: loadOrders, inventory: loadInventory, billing: loadBilling, customers: loadCustomers, khata: loadKhata, coach: loadCoach, insights: loadInsights, plan: () => {} })[t]();
+  ({ orders: loadOrders, inventory: loadInventory, billing: loadBilling, customers: loadCustomers, coach: loadCoach, insights: loadInsights, plan: () => {} })[t]();
 }
 document.querySelectorAll('#tabs button').forEach((b) => b.onclick = () => setTab(b.dataset.tab));
 
 // ---- orders ----
 const STATUS_TEXT = { placed: 'needs your confirmation', confirmed: 'confirmed', packed: 'packed', out_for_delivery: 'out for delivery', completed: 'completed', cancelled: 'cancelled' };
 const ACTIONS = {
-  placed: (o) => [['confirmed', o.paymentMethod === 'khata' ? 'Confirm & give credit' : 'Confirm order'], ['cancelled', 'Reject']],
+  placed: (o) => [['confirmed', 'Confirm order'], ['cancelled', 'Reject']],
   confirmed: () => [['packed', 'Mark packed'], ['cancelled', 'Cancel']],
   packed: (o) => o.fulfilment === 'delivery' ? [['out_for_delivery', 'Send with rider']] : [['completed', 'Customer picked up']],
   out_for_delivery: () => [['completed', 'Delivered']],
@@ -342,7 +311,7 @@ async function loadOrders() {
         <a href="${esc(o.rider.link)}" target="_blank">open rider page</a></div>` : ''}
       ${o.status === 'packed' && o.fulfilment === 'delivery' ? `<div class="row"><input id="rn-${o.id}" class="grow" placeholder="Rider name"><input id="rp-${o.id}" class="grow" placeholder="Rider phone" inputmode="numeric" maxlength="10"></div>` : ''}
       <div class="row" style="margin-top:6px"><strong class="grow">${rupees(o.total)} <span class="badge ${o.paymentStatus}">${payBadge(o)}</span></strong>
-        ${['claimed', 'pending'].includes(o.paymentStatus) && o.paymentMethod !== 'khata' && o.status !== 'cancelled' && o.status !== 'placed' ? `<button class="small secondary" onclick="paymentReceived('${o.id}')">Money received</button>` : ''}
+        ${['claimed', 'pending'].includes(o.paymentStatus) && o.status !== 'cancelled' && o.status !== 'placed' ? `<button class="small secondary" onclick="paymentReceived('${o.id}')">Money received</button>` : ''}
         ${o.customerPhone && waText(o) ? `<a href="${esc(waUrl(o.customerPhone, waText(o)))}" target="_blank"><button class="small secondary">WhatsApp update</button></a>` : ''}
         ${(ACTIONS[o.status]?.(o) || []).map(([st, t]) => `<button class="small ${st === 'cancelled' ? 'secondary' : ''}" onclick="setStatus('${o.id}','${st}')">${t}</button>`).join('')}</div>
     </div>`).join('') || '<p class="muted">No open orders right now. New orders show up here automatically, and you get an email.</p>';
@@ -381,7 +350,7 @@ function renderCustomers() {
     <div class="card" ${c.tier === 'prime' ? 'style="border-color:var(--gold)"' : ''}>
       <div class="row"><strong class="grow"><span class="muted">#${i + 1}</span> ${esc(c.name)} <span class="muted">${esc(c.phone)}${c.email ? ' · ' + esc(c.email) : ''}</span></strong>
         <span class="badge ${TIER[c.tier][1]}">${TIER[c.tier][0]}</span>
-        ${c.khata > 0 ? `<span class="badge on_khata">owes ${rupees(c.khata)}</span>` : ''}</div>
+</div>
       <div class="muted">${c.orders30} orders · ${rupees(c.spend30)} in 30 days &nbsp;|&nbsp; ${c.orders} orders · ${rupees(c.spend)} all time · customer since ${when(c.firstOrderAt)} · last ${when(c.lastOrderAt)}</div>
       <div style="margin:6px 0">Usually orders <strong>${hourLabel(c.usualHour)}</strong> <span class="muted">(${c.usualHourShare}% of orders)</span></div>
       <div class="muted">Buys most: ${c.favourites.map((f) => `${esc(f.name)} ×${f.qty}`).join(', ')}</div>
@@ -537,40 +506,6 @@ async function bill(paymentMethod) {
     <button class="small secondary" onclick="openPayment('${esc(r.paymentLink)}')">Show QR to customer</button></div>` : ''}</div>`;
   toast('Bill saved, stock updated'); refreshMe(); loadBilling();
 }
-
-// ---- khata + agent ----
-function waLink(r) {
-  const link = r.paymentLink?.startsWith('/') ? location.origin + r.paymentLink : r.paymentLink;
-  return waUrl(r.customerPhone, `${r.message}\n\nPay here: ${link}`);
-}
-function reminderHtml(r) {
-  const head = `<p><span class="badge ${r.status}">${r.status}</span> <strong>${esc(r.customerName)}</strong> · ${rupees(r.amount)}</p>`;
-  if (r.status === 'pending') return `<div class="card">${head}
-    <textarea id="msg-${r.id}" rows="3">${esc(r.message)}</textarea>
-    <div class="row"><button class="grow" onclick="approve('${r.id}')">Approve &amp; create payment link</button><button class="danger" onclick="reject('${r.id}')">Reject</button></div></div>`;
-  if (r.status === 'approved') return `<div class="card">${head}<p class="muted">${esc(r.message)}</p>
-    <div class="row"><a href="${esc(waLink(r))}" target="_blank"><button>Send on WhatsApp</button></a><button class="secondary" onclick="markPaid('${r.id}')">Mark paid</button></div></div>`;
-  return `<div class="card">${head}<p class="muted">${esc(r.message)}</p></div>`;
-}
-async function loadKhata() {
-  const k = await call('/api/owner/khata');
-  $('balances').innerHTML = k.balances.map((b) => `<tr><td>${esc(b.customerName)}<div class="muted">${esc(b.customerPhone)}</div></td><td class="num">${rupees(b.balance)}</td></tr>`).join('') || '<tr><td class="muted">Nobody owes you anything 🎉</td></tr>';
-  $('reminders').innerHTML = k.reminders.map(reminderHtml).join('') || '<p class="muted">No drafts yet.</p>';
-}
-async function addKhata() {
-  await call('/api/owner/khata/entries', { body: { customerName: $('kName').value.trim(), customerPhone: $('kPhone').value.trim(), amount: Number($('kAmount').value), type: $('kType').value, note: $('kNote').value.trim() } });
-  ['kName', 'kPhone', 'kAmount', 'kNote'].forEach((f) => $(f).value = '');
-  toast('Saved to khata'); loadKhata();
-}
-async function runAgent() {
-  const btn = $('runAgentBtn');
-  btn.disabled = true; btn.textContent = 'Agent is working…';
-  try { await call('/api/owner/run-agent', { body: {} }); toast('Agent finished. Check the drafts below.'); }
-  catch {} finally { btn.disabled = false; btn.textContent = 'Ask Khata Munshi to check dues'; loadKhata(); }
-}
-async function approve(id) { const r = await call(`/api/owner/reminders/${id}/approve`, { body: { message: $('msg-' + id).value } }); toast('Approved. Payment link ready.'); loadKhata(); }
-async function reject(id) { await call(`/api/owner/reminders/${id}/reject`, { body: { reason: 'shopkeeper rejected' } }); loadKhata(); }
-async function markPaid(id) { await call(`/api/owner/reminders/${id}/mark-paid`, { body: {} }); loadKhata(); }
 
 // ---- insights (Premium) ----
 async function loadInsights() {

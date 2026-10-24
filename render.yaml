@@ -24,8 +24,6 @@ services:
       # Filled in on the Render dashboard (prompted when the Blueprint is created; can be left blank).
       - key: AGENTICORG_API_KEY
         sync: false
-      - key: AGENTICORG_AGENT_ID
-        sync: false
       - key: AGENTICORG_SHOPPER_AGENT_ID
         sync: false
       - key: AGENTICORG_DEMAND_AGENT_ID

@@ -88,7 +88,6 @@
       <h3>Payment</h3>
       <label><input type="radio" name="pay" value="online" checked style="width:auto"> Pay by UPI QR once the shop confirms</label>
       <label><input type="radio" name="pay" value="pay_at_shop" style="width:auto"> Pay at pickup / on delivery</label>
-      <label><input type="radio" name="pay" value="khata" style="width:auto"> Add to my khata (the shop must agree)</label>
       <button class="block" style="margin-top:12px" id="placeBtn" onclick="placeOrder()">Send order to shop</button>
       <p class="muted">The shop confirms every order before it's final. You'll get an email at each step.</p>
     </div>
@@ -311,7 +310,7 @@ async function placeOrder() {
 const STEP_LABEL = { placed: 'Waiting for shop to confirm', confirmed: 'Confirmed: packing', packed: 'Packed', out_for_delivery: 'On the way', completed: 'Done', cancelled: 'Cancelled' };
 const stepsFor = (o) => o.fulfilment === 'delivery' ? ['placed', 'confirmed', 'packed', 'out_for_delivery', 'completed'] : ['placed', 'confirmed', 'packed', 'completed'];
 const statusText = (o) => o.status === 'packed' && o.fulfilment === 'pickup' ? 'Packed: ready for pickup' : o.status === 'completed' ? (o.fulfilment === 'delivery' ? 'Delivered' : 'Picked up') : STEP_LABEL[o.status];
-const payText = (o) => ({ paid: 'Paid', claimed: 'Payment sent, shop checking', on_khata: 'On khata' }[o.paymentStatus]
+const payText = (o) => ({ paid: 'Paid', claimed: 'Payment sent, shop checking' }[o.paymentStatus]
   || (o.paymentMethod === 'pay_at_shop' ? (o.fulfilment === 'delivery' ? 'Pay on delivery' : 'Pay at pickup') : o.paymentMethod === 'online' ? (o.status === 'placed' ? 'Pay after shop confirms' : 'Payment due') : 'Waiting for shop'));
 
 async function loadOrders() {

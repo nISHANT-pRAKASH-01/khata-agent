@@ -5,13 +5,12 @@ const BASE = (process.env.AGENTICORG_BASE_URL || 'https://agenticorg.hackathon.p
 
 // Which env var holds each agent's UUID.
 const AGENTS = {
-  khata: 'AGENTICORG_AGENT_ID',
   shopper: 'AGENTICORG_SHOPPER_AGENT_ID',
   demand: 'AGENTICORG_DEMAND_AGENT_ID',
   coach: 'AGENTICORG_COACH_AGENT_ID',
 };
 
-export const isConfigured = (agent = 'khata') =>
+export const isConfigured = (agent) =>
   Boolean(process.env.AGENTICORG_API_KEY && process.env[AGENTS[agent]]);
 
 export async function runAgent(agent, inputs) {

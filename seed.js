@@ -52,7 +52,7 @@ const CUSTOMERS = [
 
 export function seed({ id, endOfDayIST, istMidnight }) {
   const now = Date.now();
-  const db = { shops: [], customers: [], products: [], orders: [], payments: [], stockMoves: [], views: [], entries: [], reminders: [], logs: [], purchases: [], stockCounts: [] };
+  const db = { shops: [], customers: [], products: [], orders: [], payments: [], stockMoves: [], views: [], logs: [], purchases: [], stockCounts: [] };
   const jitter = () => (rand() - 0.5) * 0.02;
 
   for (const c of CUSTOMERS) db.customers.push({ id: id(), name: c[0], phone: c[1], prefHour: c[2], area: pick(SHOPS).area, mock: true, at: new Date(now - 40 * DAY).toISOString() });
@@ -92,7 +92,7 @@ export function seed({ id, endOfDayIST, istMidnight }) {
         customerId: cust.id, customerName: cust.name, customerPhone: cust.phone,
         items: lines, total: lines.reduce((t, l) => t + l.price * l.qty, 0),
         fulfilment: walkIn ? 'counter' : (sh.plan === 'premium' && rand() < 0.5 ? 'delivery' : 'pickup'),
-        paymentMethod: pick(['online', 'pay_at_shop', 'khata']), paymentStatus: 'paid', status: 'completed',
+        paymentMethod: pick(['online', 'pay_at_shop', 'cash']), paymentStatus: 'paid', status: 'completed',
         mock: true, at: at.toISOString(),
       });
     }
@@ -103,12 +103,6 @@ export function seed({ id, endOfDayIST, istMidnight }) {
 
   seedHabits(db, { id });
 
-  // Some open udhaar so the khata agent has dues to work on.
-  for (const shop of db.shops) {
-    for (const c of db.customers.slice(0, 3)) {
-      db.entries.push({ id: id(), shopId: shop.id, customerName: c.name, customerPhone: c.phone, amount: 150 + Math.floor(rand() * 900), type: 'credit', note: 'Monthly ration', mock: true, at: new Date(now - Math.floor(rand() * 20 * DAY)).toISOString() });
-    }
-  }
   return db;
 }
 

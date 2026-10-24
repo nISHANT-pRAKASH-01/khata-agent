@@ -24,7 +24,7 @@ const endOfDayIST = (d) => new Date(istMidnight(d) + DAY - 1);
 
 const DATA_FILE = process.env.DATA_FILE || 'data.json';
 const db = fs.existsSync(DATA_FILE) ? JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')) : seed({ id, endOfDayIST, istMidnight });
-// Older data files (khata-only) predate the marketplace: add the mock marketplace alongside.
+// Very old data files predate the marketplace: add the mock marketplace alongside.
 // Data files from before the inventory coach: give the demo shops their stock-keeping history.
 if (db.products && !db.purchases) {
   db.purchases = []; db.stockCounts = [];
@@ -58,24 +58,6 @@ const publicShop = (s) => ({
 const privateShop = (s) => ({ ...publicShop(s), ownerName: s.ownerName, phone: s.phone, email: s.email, plan: s.plan, planActive: planActive(s) });
 const shopOf = (o) => db.shops.find((s) => s.id === o.shopId);
 const validPoint = (p) => p && Number.isFinite(p.lat) && Number.isFinite(p.lng) && Math.abs(p.lat) <= 90 && Math.abs(p.lng) <= 180;
-
-function balances(shopId) {
-  const map = {};
-  for (const e of db.entries.filter((e) => e.shopId === shopId)) {
-    const key = e.customerPhone;
-    map[key] ??= { customerName: e.customerName, customerPhone: e.customerPhone, balance: 0, lastEntryAt: e.at };
-    map[key].balance += e.type === 'credit' ? e.amount : -e.amount;
-    map[key].lastEntryAt = e.at;
-  }
-  return Object.values(map);
-}
-
-function addKhata(shopId, { customerName, customerPhone, amount, type, note }) {
-  const entry = { id: id(), shopId, customerName, customerPhone, amount: Number(amount), type, note, at: now() };
-  db.entries.push(entry);
-  log('shopkeeper', `khata_${type}`, entry);
-  return entry;
-}
 
 // ---- Email (fire-and-forget; never blocks or fails an order) ----
 function notify(to, subject, text) {
@@ -177,15 +159,12 @@ function markPaid(p, source) {
   } else if (p.kind === 'plan') {
     const shop = db.shops.find((s) => s.id === p.shopId);
     if (shop && !p.planActivated) { p.planActivated = true; activatePlan(shop, p.refId); }
-  } else if (p.kind === 'khata') {
-    const r = db.reminders.find((x) => x.id === p.refId);
-    if (r && r.status === 'approved') settleReminder(r, `Paid via ${p.provider} ${p.utr ? 'UTR ' + p.utr : p.providerId || p.id}`);
   }
   save();
 }
 
 // Payer says "I've paid" on the QR page. Plans go live straight away (UTR kept for checking);
-// orders and khata wait for the shopkeeper to confirm the money arrived.
+// orders wait for the shopkeeper to confirm the money arrived.
 function claimPaid(p, utr) {
   if (p.status !== 'pending') return;
   p.status = 'claimed';
@@ -200,11 +179,6 @@ function claimPaid(p, utr) {
     if (shop && !p.planActivated) { p.planActivated = true; activatePlan(shop, p.refId); }
   }
   save();
-}
-
-function settleReminder(r, note) {
-  r.status = 'paid';
-  addKhata(r.shopId, { customerName: r.customerName, customerPhone: r.customerPhone, amount: r.amount, type: 'payment', note });
 }
 
 const app = express();
@@ -349,7 +323,7 @@ app.post('/api/orders', customerAuth, (req, res) => {
   if (!['pickup', 'delivery'].includes(fulfilment)) fail(400, 'Choose pickup or delivery');
   if (fulfilment === 'delivery' && !isPremium(shop)) fail(400, 'This shop offers pickup only');
   if (fulfilment === 'delivery' && !address) fail(400, 'Delivery address required');
-  if (!['online', 'pay_at_shop', 'khata'].includes(paymentMethod)) fail(400, 'Choose a payment method');
+  if (!['online', 'pay_at_shop'].includes(paymentMethod)) fail(400, 'Choose a payment method');
 
   const lines = priceLines(shop.id, items);
   const order = {
@@ -507,7 +481,6 @@ const NEXT = (o) => ({
 function setStatus(o, status, actor, base) {
   if (status === 'cancelled') {
     moveStock(o.shopId, o.items, +1, 'cancel', o.id);
-    if (o.paymentStatus === 'on_khata') addKhata(o.shopId, { customerName: o.customerName, customerPhone: o.customerPhone, amount: o.total, type: 'payment', note: `Order ${o.id} cancelled` });
   }
   if (status === 'completed' && o.paymentMethod === 'pay_at_shop') o.paymentStatus = 'paid';
   o.status = status;
@@ -523,11 +496,6 @@ app.post('/api/owner/orders/:id/status', ownerAuth, async (req, res) => {
   if (o.status === status) return res.json(o); // repeated click: nothing to do
   if (!NEXT(o).includes(status)) fail(400, `Can't move a ${o.status} order to ${status}`);
   if (status === 'confirmed') {
-    // Confirming a khata order is the shopkeeper agreeing to give credit.
-    if (o.paymentMethod === 'khata') {
-      addKhata(o.shopId, { customerName: o.customerName, customerPhone: o.customerPhone, amount: o.total, type: 'credit', note: `Order ${o.id}` });
-      o.paymentStatus = 'on_khata';
-    }
     if (o.paymentMethod === 'online' && !o.paymentId) {
       const p = await createPayment({ kind: 'order', refId: o.id, shopId: o.shopId, amount: o.total, description: `Order at ${req.shop.shopName}`, customerName: o.customerName, customerPhone: o.customerPhone });
       o.paymentId = p.id;
@@ -564,7 +532,6 @@ function shopCustomers(shopId) {
     c.hours[istHour(o.at)] = (c.hours[istHour(o.at)] || 0) + 1;
     for (const l of o.items) c.items[l.name] = (c.items[l.name] || 0) + l.qty;
   }
-  const dues = Object.fromEntries(balances(shopId).map((b) => [b.customerPhone, b.balance]));
   const list = Object.values(map);
   // Prime = this shop's top 20% by spend in the last 30 days (at least ₹2,000 and 2 orders).
   const spends = list.map((c) => c.spend30).sort((a, b) => b - a);
@@ -574,7 +541,6 @@ function shopCustomers(shopId) {
     const [hour, count] = Object.entries(hours).sort((a, b) => b[1] - a[1])[0];
     return {
       ...c,
-      khata: dues[c.phone] || 0,
       favourites: Object.entries(items).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([name, qty]) => ({ name, qty })),
       usualHour: Number(hour),
       usualHourShare: Math.round((count / c.orders) * 100),
@@ -648,8 +614,7 @@ app.post('/api/owner/bills', ownerAuth, async (req, res) => {
   if (!validKey(idempotencyKey)) fail(400, 'Missing idempotency key');
   const existing = db.orders.find((o) => o.shopId === req.shop.id && o.idempotencyKey === idempotencyKey);
   if (existing) return res.json({ bill: existing, paymentLink: db.payments.find((p) => p.id === existing.paymentId)?.link, duplicate: true });
-  if (!['cash', 'online', 'khata'].includes(paymentMethod)) fail(400, 'Choose cash, UPI QR or khata');
-  if (paymentMethod === 'khata' && (!customerName || !/^\d{10}$/.test(customerPhone || ''))) fail(400, 'Customer name and 10-digit phone needed for khata');
+  if (!['cash', 'online'].includes(paymentMethod)) fail(400, 'Choose cash or UPI QR');
   if (customerPhone && !/^\d{10}$/.test(customerPhone)) fail(400, 'Phone must be 10 digits');
   let lines = priceLines(req.shop.id, items);
   const bill = {
@@ -662,10 +627,6 @@ app.post('/api/owner/bills', ownerAuth, async (req, res) => {
     payment = await createPayment({ kind: 'order', refId: bill.id, shopId: req.shop.id, amount: bill.total, description: `Bill at ${req.shop.shopName}`, customerName, customerPhone });
     bill.paymentId = payment.id;
     lines = priceLines(req.shop.id, items); // stock may have moved while we waited on Pine Labs
-  }
-  if (paymentMethod === 'khata') {
-    addKhata(req.shop.id, { customerName, customerPhone, amount: bill.total, type: 'credit', note: `Bill ${bill.id}` });
-    bill.paymentStatus = 'on_khata';
   }
   moveStock(req.shop.id, lines, -1, 'walk_in_bill', bill.id);
   db.orders.push(bill);
@@ -838,7 +799,7 @@ function lessons(shopId, h) {
       steps: ['When the wholesaler\'s goods arrive, keep their bill (parchi) in hand.', 'Open Inventory → 📦 Wholesale stock-in.', 'Enter the supplier, bill number, and each item with quantity and cost price.', 'Save. Stock goes up, and your margins are now known.'],
       why: 'If stock comes in without an entry, the app thinks you have less than you do, and online customers see "out of stock".' },
     { id: 'bill', title: 'Bill every sale, even ₹10', done: db.orders.some((o) => o.shopId === shopId && o.channel === 'walk_in' && istDay(o.at) === today),
-      steps: ['Customer at the counter? Open Billing.', 'Tap Add on each item, or search it.', 'Choose Cash, UPI QR or Khata, then save.', 'Stock goes down by itself; no need to subtract anything.'],
+      steps: ['Customer at the counter? Open Billing.', 'Tap Add on each item, or search it.', 'Choose Cash or UPI QR, then save.', 'Stock goes down by itself; no need to subtract anything.'],
       why: 'Every sale without a bill makes your stock look higher than the shelf. Then you promise items online that you don\'t have.' },
     { id: 'count', title: 'Count your stock once a week', done: h.lastCountDaysAgo !== null && h.lastCountDaysAgo <= 7,
       steps: ['Pick a quiet time, e.g. Sunday morning.', 'Open Inventory → 🧮 Count stock.', 'Type what is actually on the shelf. Start with your 10 fastest-selling items.', 'Save. Anything missing shows up; those were usually sold without a bill.'],
@@ -890,7 +851,7 @@ function saveCoachTips({ shopId, summary, tips, source }) {
 // Plain answers for the most common questions, used when the AgenticOrg coach isn't reachable.
 const FAQ = [
   [/wholesale|supplier|delivery|purchase|maal|aaya|stock.?in|arrived|bought/i, 'When goods arrive from the wholesaler: open Inventory → 📦 Wholesale stock-in. Enter the supplier and bill number, then each item with quantity and cost price, and save. Stock goes up by itself. If an item is new, first add it under "+ Add a product" with opening stock 0.'],
-  [/bill|sale|sold|counter|customer.*buy|becha/i, 'For every counter sale: open Billing, tap Add on each item, choose Cash / UPI QR / Khata, and save. Stock goes down by itself. Bill even small sales; unbilled sales are why the app\'s stock and your shelf stop matching.'],
+  [/bill|sale|sold|counter|customer.*buy|becha/i, 'For every counter sale: open Billing, tap Add on each item, choose Cash or UPI QR, and save. Stock goes down by itself. Bill even small sales; unbilled sales are why the app\'s stock and your shelf stop matching.'],
   [/count|mismatch|missing|wrong|shelf|match|galat/i, 'If the app\'s stock doesn\'t match the shelf: open Inventory → 🧮 Count stock, type what you actually have, and save. The app corrects itself and shows what was missing, which was usually sold without a bill. Do this once a week.'],
   [/damage|expired|broken|kharab|waste|return/i, 'For damaged or expired items: open 🧮 Count stock and enter the good quantity left. The difference is removed from stock. For items you return to the supplier, do the same after the return.'],
   [/new (item|product)|add (item|product)|naya/i, 'To add a new item: Inventory → "+ Add a product". Put opening stock as 0, then enter the actual quantity through 📦 Wholesale stock-in so the cost price is recorded too.'],
@@ -941,78 +902,6 @@ app.post('/api/owner/coach/ask', ownerAuth, async (req, res) => {
     answer: hit ? hit[1] : 'I can help with: entering wholesale deliveries, billing every sale, counting stock, damaged or expired items, adding new items, prices and margins, and low-stock alerts. Try asking about one of these.',
   });
 });
-
-// ---- Khata (udhaar) ----
-app.get('/api/owner/khata', ownerAuth, (req, res) => {
-  const shopId = req.shop.id;
-  res.json({
-    balances: balances(shopId).filter((b) => b.balance !== 0),
-    entries: db.entries.filter((e) => e.shopId === shopId).slice(-50).reverse(),
-    reminders: db.reminders.filter((r) => r.shopId === shopId).reverse().map((r) => ({
-      ...r, paymentLink: db.payments.find((p) => p.id === r.paymentId)?.link,
-    })),
-  });
-});
-
-app.post('/api/owner/khata/entries', ownerAuth, (req, res) => {
-  const { customerName, customerPhone, amount, type, note } = req.body;
-  if (!customerName || !customerPhone || !(amount > 0) || !['credit', 'payment'].includes(type)) {
-    fail(400, 'customerName, customerPhone, amount > 0, type credit|payment required');
-  }
-  res.json(addKhata(req.shop.id, { customerName, customerPhone, amount, type, note }));
-});
-
-// Shopkeeper asks the AgenticOrg agent to check dues now; it drafts via our /mcp tools.
-app.post('/api/owner/run-agent', ownerAuth, async (req, res) => {
-  const shop = req.shop;
-  if (!agenticorg.isConfigured('khata')) fail(503, 'AgenticOrg agent not connected yet');
-  log('shopkeeper', 'asked_agent', { shopId: shop.id });
-  try {
-    const run = await agenticorg.runAgent('khata', { shopId: shop.id, shopName: shop.shopName, task: `Check dues for shop ${shop.id} (${shop.shopName}) and draft reminders` });
-    log('agent', 'agenticorg_run', { agent: 'khata', shopId: shop.id, runId: run.runId, status: run.status });
-    res.json({ status: run.status, summary: agenticorg.outputText(run.output) });
-  } catch (err) {
-    log('agent', 'agenticorg_run_failed', { shopId: shop.id, error: err.message });
-    fail(502, err.message);
-  }
-});
-
-const ownReminder = (req, status) => {
-  const r = db.reminders.find((x) => x.id === req.params.id && x.shopId === req.shop.id);
-  if (!r || r.status !== status) fail(400, `Reminder not ${status}`);
-  return r;
-};
-
-// Human-in-the-loop: the shopkeeper approves or rejects what the agent drafted.
-app.post('/api/owner/reminders/:id/approve', ownerAuth, async (req, res) => {
-  const r = ownReminder(req, 'pending');
-  if (req.body.message) r.message = req.body.message; // shopkeeper may edit before approving
-  const p = await createPayment({
-    kind: 'khata', refId: r.id, shopId: r.shopId, amount: r.amount, description: `Khata dues at ${req.shop.shopName}`,
-    customerName: r.customerName, customerPhone: r.customerPhone,
-  });
-  r.paymentId = p.id;
-  r.status = 'approved';
-  r.approvedAt = now();
-  log('shopkeeper', 'approved_reminder', { reminderId: r.id, amount: r.amount, paymentLink: p.link });
-  res.json({ ...r, paymentLink: p.link });
-});
-
-app.post('/api/owner/reminders/:id/reject', ownerAuth, (req, res) => {
-  const r = ownReminder(req, 'pending');
-  r.status = 'rejected';
-  log('shopkeeper', 'rejected_reminder', { reminderId: r.id, reason: req.body.reason });
-  res.json(r);
-});
-
-app.post('/api/owner/reminders/:id/mark-paid', ownerAuth, (req, res) => {
-  const r = ownReminder(req, 'approved');
-  const p = db.payments.find((x) => x.id === r.paymentId);
-  if (p) markPaid(p, 'shopkeeper');
-  else settleReminder(r, 'Marked paid by shopkeeper');
-  res.json(r);
-});
-
 
 // ---- AI agent 1: Shopping assistant ----
 // A customer's free-text list ("2 atta, 1L oil, doodh") -> the nearby shops that can fill most of it.
@@ -1244,17 +1133,6 @@ app.post('/api/owner/stock-advice/:id/:index', ownerAuth, (req, res) => {
 });
 
 // ---- Agent tools (used by the AgenticOrg agents over MCP, or REST with x-api-key) ----
-function getDues(shopId) {
-  const result = db.shops.filter((s) => !shopId || s.id === shopId).map((shop) => ({
-    shopId: shop.id,
-    shopName: shop.shopName,
-    ownerName: shop.ownerName,
-    dues: balances(shop.id).filter((b) => b.balance > 0),
-  })).filter((s) => s.dues.length);
-  log('agent', 'read_dues', { shops: result.length });
-  return result;
-}
-
 function getLowStock(shopId) {
   const result = db.shops.filter((s) => !shopId || s.id === shopId).map((shop) => ({
     shopId: shop.id,
@@ -1265,52 +1143,21 @@ function getLowStock(shopId) {
   return result;
 }
 
-function draftReminder({ shopId, customerPhone, message }) {
-  const due = balances(shopId).find((b) => b.customerPhone === customerPhone);
-  if (!due || due.balance <= 0) throw new Error('No dues for that shop/customer');
-  if (!message) throw new Error('message required');
-  const r = { id: id(), shopId, customerName: due.customerName, customerPhone, amount: due.balance, message, status: 'pending', at: now() };
-  db.reminders.push(r);
-  log('agent', 'drafted_reminder', { reminderId: r.id, shopId, amount: r.amount, message });
-  return { ...r, note: 'Draft only. Waiting for shopkeeper approval; nothing was sent.' };
-}
-
 const agentAuth = (req, res, next) =>
   req.get('x-api-key') === process.env.AGENT_API_KEY ||
   req.get('authorization') === `Bearer ${process.env.AGENT_API_KEY}`
     ? next()
     : res.status(401).json({ error: 'Bad API key' });
 
-app.get('/api/agent/dues', agentAuth, (req, res) => res.json(getDues(req.query.shopId)));
-
-app.post('/api/agent/reminders', agentAuth, (req, res) => {
-  try { res.json(draftReminder(req.body)); } catch (err) { res.status(400).json({ error: err.message }); }
-});
-
 // Remote MCP (Streamable HTTP, stateless) — register in AgenticOrg under Connectors > Remote MCP.
 function buildMcpServer() {
-  const server = new McpServer({ name: 'khata-agent', version: '1.3.0' });
+  const server = new McpServer({ name: 'uncle-store', version: '2.0.0' });
   const asText = (data) => ({ content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] });
-  server.registerTool('get_dues', {
-    description: 'List kirana shops with customers who owe money on khata (udhaar): shopId, shop/owner name, customer name, phone and balance in rupees. Pass shopId to check one shop.',
-    inputSchema: { shopId: z.string().optional().describe('Only this shop') },
-    annotations: { readOnlyHint: true },
-  }, async ({ shopId }) => asText(getDues(shopId)));
   server.registerTool('get_low_stock', {
     description: 'List products that are at or below their low-stock level, per shop. Pass shopId to check one shop.',
     inputSchema: { shopId: z.string().optional().describe('Only this shop') },
     annotations: { readOnlyHint: true },
   }, async ({ shopId }) => asText(getLowStock(shopId)));
-  server.registerTool('draft_reminder', {
-    description: 'Save a polite payment-reminder DRAFT for one customer, written in the shopkeeper\'s name. Does not send anything: the shopkeeper must approve it in the app, which then creates a payment link.',
-    inputSchema: {
-      shopId: z.string().describe('shopId from get_dues'),
-      customerPhone: z.string().describe('customerPhone from get_dues'),
-      message: z.string().describe('Short reminder text in Hinglish, signed with the shop name'),
-    },
-  }, async (args) => {
-    try { return asText(draftReminder(args)); } catch (err) { return { ...asText({ error: err.message }), isError: true }; }
-  });
   server.registerTool('find_shops_for_list', {
     description: 'Shopping assistant: given a customer\'s shopping list (already split into items), return up to 3 nearby open shops ranked by how many items they have in stock, then distance, then price. Pass the requestId you were given so the app can show the result to the customer.',
     inputSchema: {
