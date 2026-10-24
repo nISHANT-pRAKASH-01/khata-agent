@@ -50,7 +50,7 @@ const publicShop = (s) => ({
   id: s.id, shopName: s.shopName, ownerName: s.ownerName, area: s.area, category: s.category, lat: s.lat, lng: s.lng,
   premium: isPremium(s), delivery: isPremium(s), open: planActive(s),
 });
-const privateShop = (s) => ({ ...publicShop(s), phone: s.phone, email: s.email, plan: s.plan, planActive: planActive(s) });
+const privateShop = (s) => ({ ...publicShop(s), ownerName: s.ownerName, phone: s.phone, email: s.email, plan: s.plan, planActive: planActive(s) });
 const shopOf = (o) => db.shops.find((s) => s.id === o.shopId);
 const validPoint = (p) => p && Number.isFinite(p.lat) && Number.isFinite(p.lng) && Math.abs(p.lat) <= 90 && Math.abs(p.lng) <= 180;
 
@@ -213,44 +213,74 @@ app.get('/api/config', (req, res) => res.json({
   googleClientId: process.env.GOOGLE_CLIENT_ID || null, plans: PLANS, areas: AREA_CENTERS,
 }));
 
-// ---- Sign in with Google (both sides) ----
-// Without GOOGLE_CLIENT_ID the app runs in demo mode: any email is accepted, clearly labelled in the UI.
-async function verifyGoogle({ credential, demoEmail, demoName }) {
-  if (!process.env.GOOGLE_CLIENT_ID) {
-    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(demoEmail || '')) fail(400, 'Enter a valid email');
-    return { email: demoEmail.toLowerCase(), name: demoName || demoEmail.split('@')[0] };
-  }
+// ---- Accounts: email + password, and "Sign in with Google" when GOOGLE_CLIENT_ID is set ----
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
+  return { salt, hash: crypto.scryptSync(password, salt, 64).toString('hex') };
+}
+function passwordOk(user, password) {
+  if (!user?.passwordHash || typeof password !== 'string') return false;
+  const { hash } = hashPassword(password, user.passwordSalt);
+  return crypto.timingSafeEqual(Buffer.from(hash, 'hex'), Buffer.from(user.passwordHash, 'hex'));
+}
+
+async function verifyGoogle(credential) {
+  if (!process.env.GOOGLE_CLIENT_ID) fail(400, 'Google sign-in is not set up yet. Use email and password.');
   if (!credential) fail(400, 'Google sign-in missing');
   const r = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(credential)}`);
   const t = await r.json().catch(() => ({}));
   if (!r.ok || t.aud !== process.env.GOOGLE_CLIENT_ID || t.email_verified !== 'true') fail(401, 'Google sign-in failed');
-  return { email: t.email.toLowerCase(), name: t.name || t.email.split('@')[0], picture: t.picture };
+  return { email: t.email.toLowerCase(), name: t.name || t.email.split('@')[0] };
 }
 
-const pendingOwners = new Map(); // signup ticket -> verified Google profile, until the shop is registered
+const pendingOwners = new Map(); // signup ticket -> verified owner identity, until the shop is registered
 
-app.post('/api/auth/google', async (req, res) => {
-  const g = await verifyGoogle(req.body);
-  if (req.body.role === 'owner') {
-    const shop = db.shops.find((s) => s.email === g.email);
+// Shared by Google and password sign-in once we know who the person is.
+function startSession(role, who, res) {
+  if (role === 'owner') {
+    const shop = db.shops.find((s) => s.email === who.email);
     if (!shop) {
       const ticket = token();
-      pendingOwners.set(ticket, g);
-      return res.json({ needsShop: true, ticket, name: g.name, email: g.email });
+      pendingOwners.set(ticket, who);
+      return res.json({ needsShop: true, ticket, name: who.name, email: who.email });
     }
     shop.token ??= token();
     save();
     return res.json({ shop: privateShop(shop), token: shop.token });
   }
-  let c = db.customers.find((x) => x.email === g.email);
+  let c = db.customers.find((x) => x.email === who.email);
   if (!c) {
-    c = { id: id(), name: g.name, email: g.email, at: now() };
+    c = { id: id(), name: who.name, email: who.email, passwordHash: who.passwordHash, passwordSalt: who.passwordSalt, at: now() };
     db.customers.push(c);
-    log('customer', 'signup', { customerId: c.id, name: g.name });
+    log('customer', 'signup', { customerId: c.id, name: who.name, method: who.passwordHash ? 'password' : 'google' });
   }
   c.token ??= token();
   save();
   res.json({ customer: customerView(c), token: c.token });
+}
+
+app.post('/api/auth/google', async (req, res) => {
+  startSession(req.body.role, await verifyGoogle(req.body.credential), res);
+});
+
+app.post('/api/auth/signup', (req, res) => {
+  const { role, name, password } = req.body;
+  const email = String(req.body.email || '').trim().toLowerCase();
+  if (!EMAIL_RE.test(email)) fail(400, 'Enter a valid email');
+  if (!name?.trim()) fail(400, 'Enter your name');
+  if (typeof password !== 'string' || password.length < 6) fail(400, 'Password must be at least 6 characters');
+  const taken = role === 'owner' ? db.shops.some((s) => s.email === email) : db.customers.some((c) => c.email === email);
+  if (taken) fail(409, 'An account with this email already exists. Sign in instead.');
+  const { salt, hash } = hashPassword(password);
+  startSession(role, { email, name: name.trim(), passwordHash: hash, passwordSalt: salt }, res);
+});
+
+app.post('/api/auth/login', (req, res) => {
+  const email = String(req.body.email || '').trim().toLowerCase();
+  const user = req.body.role === 'owner' ? db.shops.find((s) => s.email === email) : db.customers.find((c) => c.email === email);
+  if (user && !user.passwordHash) fail(400, 'This account uses Google sign-in.');
+  if (!passwordOk(user, req.body.password)) fail(401, 'Wrong email or password');
+  startSession(req.body.role, { email, name: user.ownerName || user.name }, res);
 });
 
 // ---- Customer side ----
@@ -259,6 +289,8 @@ const customerAuth = (req, res, next) => {
   req.customer = db.customers.find((c) => c.token && c.token === req.get('x-customer-token'));
   req.customer ? next() : res.status(401).json({ error: 'Please log in again' });
 };
+
+app.get('/api/customers/me', customerAuth, (req, res) => res.json(customerView(req.customer)));
 
 app.patch('/api/customers/me', customerAuth, (req, res) => {
   const { name, phone, area } = req.body;
@@ -420,20 +452,20 @@ const ownerAuth = (req, res, next) => {
 
 app.post('/api/owner/signup', (req, res) => {
   const g = pendingOwners.get(req.body.ticket);
-  if (!g) fail(401, 'Please sign in with Google again');
+  if (!g) fail(401, 'Please sign in again');
   const { shopName, phone, area, category, location } = req.body;
   if (!shopName || !area) fail(400, 'Shop name and area are required');
   if (!/^\d{10}$/.test(phone || '')) fail(400, 'Enter a 10-digit phone number');
-  if (db.shops.some((s) => s.email === g.email)) fail(409, 'This Google account already has a shop');
+  if (db.shops.some((s) => s.email === g.email)) fail(409, 'This account already has a shop');
   const pin = validPoint(location) ? location : AREA_CENTERS[area] || AREA_CENTERS.Indiranagar;
-  const shop = { id: id(), ownerName: g.name, email: g.email, shopName, phone, area, category: category || 'kirana', lat: pin.lat, lng: pin.lng, plan: null, token: token(), at: now() };
+  const shop = { id: id(), ownerName: g.name, email: g.email, passwordHash: g.passwordHash, passwordSalt: g.passwordSalt, shopName, phone, area, category: category || 'kirana', lat: pin.lat, lng: pin.lng, plan: null, token: token(), at: now() };
   db.shops.push(shop);
   pendingOwners.delete(req.body.ticket);
   log('shopkeeper', 'signup', { shopId: shop.id, shopName, area });
   res.json({ shop: privateShop(shop), token: shop.token });
 });
 
-// Phone + PIN only works for the seeded demo shops; real owners sign in with Google.
+// Phone + PIN only works for the seeded demo shops; real owners sign in with their account.
 app.post('/api/owner/demo-login', (req, res) => {
   const shop = db.shops.find((s) => s.mock && s.phone === req.body.phone && s.pin === req.body.pin);
   if (!shop) fail(401, 'Wrong demo phone or PIN');
@@ -514,16 +546,23 @@ app.post('/api/owner/orders/:id/payment-received', ownerAuth, (req, res) => {
 function shopCustomers(shopId) {
   const map = {};
   for (const o of db.orders.filter((o) => o.shopId === shopId && o.status !== 'cancelled' && o.customerPhone)) {
-    const c = map[o.customerPhone] ??= { name: o.customerName, phone: o.customerPhone, email: o.customerEmail, orders: 0, spend: 0, lastOrderAt: o.at, items: {}, hours: {} };
+    const c = map[o.customerPhone] ??= { name: o.customerName, phone: o.customerPhone, email: o.customerEmail, orders: 0, spend: 0, orders30: 0, spend30: 0, firstOrderAt: o.at, lastOrderAt: o.at, items: {}, hours: {} };
     c.orders++;
     c.spend += o.total;
+    if (Date.now() - Date.parse(o.at) < 30 * DAY) { c.orders30++; c.spend30 += o.total; }
+    if (o.at < c.firstOrderAt) c.firstOrderAt = o.at;
     if (o.at > c.lastOrderAt) c.lastOrderAt = o.at;
     c.email ??= o.customerEmail;
     c.hours[istHour(o.at)] = (c.hours[istHour(o.at)] || 0) + 1;
     for (const l of o.items) c.items[l.name] = (c.items[l.name] || 0) + l.qty;
   }
   const dues = Object.fromEntries(balances(shopId).map((b) => [b.customerPhone, b.balance]));
-  return Object.values(map).map(({ items, hours, ...c }) => {
+  const list = Object.values(map);
+  // Prime = this shop's top 20% by spend in the last 30 days (at least ₹2,000 and 2 orders).
+  const spends = list.map((c) => c.spend30).sort((a, b) => b - a);
+  const primeCutoff = Math.max(PRIME.minSpend30, spends[Math.max(0, Math.ceil(spends.length * PRIME.topShare) - 1)] ?? Infinity);
+  const tierOf = (c) => c.spend30 >= primeCutoff && c.orders30 >= PRIME.minOrders30 ? 'prime' : c.orders > 1 ? 'regular' : 'new';
+  return list.map(({ items, hours, ...c }) => {
     const [hour, count] = Object.entries(hours).sort((a, b) => b[1] - a[1])[0];
     return {
       ...c,
@@ -531,11 +570,31 @@ function shopCustomers(shopId) {
       favourites: Object.entries(items).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([name, qty]) => ({ name, qty })),
       usualHour: Number(hour),
       usualHourShare: Math.round((count / c.orders) * 100),
+      tier: tierOf(c),
     };
   }).sort((a, b) => b.lastOrderAt.localeCompare(a.lastOrderAt));
 }
 
-app.get('/api/owner/customers', ownerAuth, (req, res) => res.json(shopCustomers(req.shop.id)));
+// Prime = a shop's best customers this month; Regular = has come back; New = one order so far.
+const PRIME = { topShare: 0.2, minSpend30: 2000, minOrders30: 2 };
+
+app.get('/api/owner/customers', ownerAuth, (req, res) => {
+  const customers = shopCustomers(req.shop.id);
+  const byOrders = [...customers].sort((a, b) => b.orders30 - a.orders30 || b.spend30 - a.spend30);
+  const bySpend = [...customers].sort((a, b) => b.spend30 - a.spend30);
+  res.json({
+    customers,
+    rules: PRIME,
+    summary: {
+      total: customers.length,
+      prime: customers.filter((c) => c.tier === 'prime').length,
+      repeatRate: customers.length ? Math.round((customers.filter((c) => c.orders > 1).length / customers.length) * 100) : 0,
+      active30: customers.filter((c) => c.orders30 > 0).length,
+      mostOrders: byOrders[0] && byOrders[0].orders30 ? { name: byOrders[0].name, orders30: byOrders[0].orders30 } : null,
+      topSpender: bySpend[0] && bySpend[0].spend30 ? { name: bySpend[0].name, spend30: bySpend[0].spend30 } : null,
+    },
+  });
+});
 
 app.get('/api/owner/products', ownerAuth, (req, res) => {
   res.json(db.products.filter((p) => p.shopId === req.shop.id).sort((a, b) => a.category.localeCompare(b.category) || a.name.localeCompare(b.name)));

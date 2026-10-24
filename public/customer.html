@@ -140,6 +140,12 @@ async function init() {
   const opts = areas.map((a) => `<option>${esc(a)}</option>`).join('');
   $('pArea').innerHTML = opts;
   $('area').innerHTML = '<option value="">All areas</option>' + opts;
+  // A saved session may be stale (logged out elsewhere, data reset): check it with the server first.
+  if (token) {
+    const r = await fetch('/api/customers/me', { headers: { 'x-customer-token': token } });
+    if (r.ok) { me = await r.json(); store.set('customer', JSON.stringify(me)); }
+    else { token = me = null; store.set('customerToken', null); store.set('customer', null); }
+  } else me = null;
   if (me?.area) $('area').value = me.area;
   if (!me) {
     show('login');

@@ -17,7 +17,7 @@
   <section id="v-auth" class="hidden">
     <div class="card" style="max-width:440px;margin:24px auto" id="signinCard">
       <h2>Shop owner sign in</h2>
-      <p class="muted">Sign in with the Gmail where you want order alerts.</p>
+      <p class="muted">Use the email where you want new-order alerts. New here? Choose "Create account".</p>
       <div id="signin"></div>
       <details style="margin-top:16px"><summary class="muted">Try a demo shop</summary>
         <label>Demo shop phone</label><input id="liPhone" inputmode="numeric" maxlength="10" value="9810000001">
@@ -104,7 +104,19 @@
     </div>
 
     <div id="t-customers" class="tab">
-      <p class="muted" style="margin-top:12px">Everyone who has ordered from your shop: what they buy and when they usually order.</p>
+      <div id="custSummary" class="grid" style="margin-top:12px"></div>
+      <div class="row" style="margin:8px 0">
+        <select id="custSort" class="grow" onchange="renderCustomers()">
+          <option value="orders30">Most orders (30 days)</option>
+          <option value="spend30">Top spenders (30 days)</option>
+          <option value="spend">Top spenders (all time)</option>
+          <option value="lastOrderAt">Most recent</option>
+          <option value="khata">Owes the most</option>
+        </select>
+        <select id="custTier" class="grow" onchange="renderCustomers()">
+          <option value="">All customers</option><option value="prime">⭐ Prime only</option><option value="regular">Regular</option><option value="new">New</option>
+        </select>
+      </div>
       <div id="customers"></div>
     </div>
 
@@ -291,17 +303,32 @@ async function paymentReceived(id) {
 }
 
 // ---- customers ----
+let custData = null;
+const TIER = { prime: ['⭐ Prime', 'premium'], regular: ['Regular', 'accepted'], new: ['New', 'pending'] };
 async function loadCustomers() {
-  const list = await call('/api/owner/customers');
-  $('customers').innerHTML = list.map((c) => `
-    <div class="card">
-      <div class="row"><strong class="grow">${esc(c.name)} <span class="muted">${esc(c.phone)}${c.email ? ' · ' + esc(c.email) : ''}</span></strong>
+  custData = await call('/api/owner/customers');
+  const s = custData.summary;
+  $('custSummary').innerHTML = `
+    <div class="card"><div class="muted">Customers</div><div class="stat">${s.total}</div><div class="muted">${s.active30} ordered this month · ${s.repeatRate}% came back</div></div>
+    <div class="card"><div class="muted">⭐ Prime customers</div><div class="stat">${s.prime}</div><div class="muted">Your top ${custData.rules.topShare * 100}% by spend this month (min ${rupees(custData.rules.minSpend30)})</div></div>
+    <div class="card"><div class="muted">Orders most</div><div class="stat" style="font-size:1.1rem">${s.mostOrders ? esc(s.mostOrders.name) : '—'}</div><div class="muted">${s.mostOrders ? s.mostOrders.orders30 + ' orders in 30 days' : ''}</div></div>
+    <div class="card"><div class="muted">Top spender</div><div class="stat" style="font-size:1.1rem">${s.topSpender ? esc(s.topSpender.name) : '—'}</div><div class="muted">${s.topSpender ? rupees(s.topSpender.spend30) + ' in 30 days' : ''}</div></div>`;
+  renderCustomers();
+}
+function renderCustomers() {
+  const key = $('custSort').value, tier = $('custTier').value;
+  const list = custData.customers.filter((c) => !tier || c.tier === tier)
+    .sort((a, b) => key === 'lastOrderAt' ? b.lastOrderAt.localeCompare(a.lastOrderAt) : (b[key] - a[key]) || (b.spend30 - a.spend30));
+  $('customers').innerHTML = list.map((c, i) => `
+    <div class="card" ${c.tier === 'prime' ? 'style="border-color:var(--gold)"' : ''}>
+      <div class="row"><strong class="grow"><span class="muted">#${i + 1}</span> ${esc(c.name)} <span class="muted">${esc(c.phone)}${c.email ? ' · ' + esc(c.email) : ''}</span></strong>
+        <span class="badge ${TIER[c.tier][1]}">${TIER[c.tier][0]}</span>
         ${c.khata > 0 ? `<span class="badge on_khata">owes ${rupees(c.khata)}</span>` : ''}</div>
-      <div class="muted">${c.orders} order${c.orders === 1 ? '' : 's'} · ${rupees(c.spend)} spent · last ${when(c.lastOrderAt)}</div>
+      <div class="muted">${c.orders30} orders · ${rupees(c.spend30)} in 30 days &nbsp;|&nbsp; ${c.orders} orders · ${rupees(c.spend)} all time · customer since ${when(c.firstOrderAt)} · last ${when(c.lastOrderAt)}</div>
       <div style="margin:6px 0">Usually orders <strong>${hourLabel(c.usualHour)}</strong> <span class="muted">(${c.usualHourShare}% of orders)</span></div>
       <div class="muted">Buys most: ${c.favourites.map((f) => `${esc(f.name)} ×${f.qty}`).join(', ')}</div>
       <a href="${esc(waUrl(c.phone, `Namaste ${c.name}, ${me.shopName} here!`))}" target="_blank"><button class="small secondary" style="margin-top:6px">WhatsApp</button></a>
-    </div>`).join('') || '<p class="muted">No customers yet. They show up here after their first order.</p>';
+    </div>`).join('') || '<p class="muted">No customers here yet. They show up after their first order.</p>';
 }
 
 // ---- inventory ----
