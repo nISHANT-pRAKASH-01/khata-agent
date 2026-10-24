@@ -83,7 +83,7 @@
     </div>
     <div class="card">
       <h3>How do you want it?</h3>
-      <label><input type="radio" name="ful" value="pickup" checked style="width:auto" onchange="syncCheckout()"> I'll pick it up: the shop packs it, I walk in and collect</label>
+      <label><input type="radio" name="ful" value="pickup" checked style="width:auto" onchange="syncCheckout()"> I'll pick it up: the shop packs it, I walk in and collect (no delivery fee)</label>
       <label id="delOpt"><input type="radio" name="ful" value="delivery" style="width:auto" onchange="syncCheckout()"> Deliver to me</label>
       <div id="addrBox" class="hidden">
         <textarea id="address" rows="2" placeholder="Flat, street, landmark"></textarea>
@@ -229,7 +229,7 @@ const shopCard = (s) => `
       <h3 style="margin-top:8px">${esc(s.shopName)}</h3>
       ${s.distanceKm != null ? `<div><strong>📍 ${travelText(s.distanceKm)}</strong></div>` : ''}
       <div class="muted">${esc(s.area)} · ${s.items} items in stock</div>
-      <div class="muted">${s.delivery ? '🛵 Delivery or pickup' : '🛍️ Order ahead, pick up packed'}</div>
+      <div class="muted">${s.delivery ? `🛵 Delivery ${rupees(s.deliveryFee)} · or free pickup` : '🛍️ Pickup only: order ahead, collect packed'}</div>
     </button>`;
 
 async function loadShops() {
@@ -282,7 +282,7 @@ async function askAssistant() {
 function renderProducts() {
   $('shopName').textContent = shop.shopName;
   const d = distKm(myLocation || me?.home || areaCentre(), shop);
-  $('shopMeta').innerHTML = `${d != null ? `<strong>📍 ${travelText(d)}</strong> · ` : ''}${esc(shop.area)} · ${esc(shop.ownerName)} · ${shop.delivery ? 'Delivery or pickup' : 'Pickup only: order ahead, collect packed'}
+  $('shopMeta').innerHTML = `${d != null ? `<strong>📍 ${travelText(d)}</strong> · ` : ''}${esc(shop.area)} · ${esc(shop.ownerName)} · ${shop.delivery ? `🛵 Delivery ${rupees(shop.deliveryFee)}, or pickup with no delivery fee` : 'Pickup only: order ahead, collect packed'}
     <br><a href="${directionsUrl(shop)}" target="_blank"><button class="small secondary" style="margin-top:8px">🧭 Directions</button></a>`;
   const byCat = {};
   for (const p of products) (byCat[p.category] ??= []).push(p);
