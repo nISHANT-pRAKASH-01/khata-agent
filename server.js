@@ -2,6 +2,9 @@ import 'dotenv/config';
 import express from 'express';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { z } from 'zod';
 import * as pinelabs from './pinelabs.js';
 
 const DATA_FILE = process.env.DATA_FILE || 'data.json';
@@ -115,11 +118,8 @@ app.post('/api/pinelabs/webhook', (req, res) => {
   res.sendStatus(200);
 });
 
-// ---- Agent API (called by the AgenticOrg agent; needs x-api-key) ----
-const agentAuth = (req, res, next) =>
-  req.get('x-api-key') === process.env.AGENT_API_KEY ? next() : res.status(401).json({ error: 'Bad API key' });
-
-app.get('/api/agent/dues', agentAuth, (req, res) => {
+// ---- Agent tools (used by the AgenticOrg agent over MCP, or REST with x-api-key) ----
+function getDues() {
   const result = db.shops.map((shop) => ({
     shopId: shop.id,
     shopName: shop.shopName,
@@ -127,19 +127,61 @@ app.get('/api/agent/dues', agentAuth, (req, res) => {
     dues: balances(shop.id).filter((b) => b.balance > 0),
   })).filter((s) => s.dues.length);
   log('agent', 'read_dues', { shops: result.length });
-  res.json(result);
-});
+  return result;
+}
 
-app.post('/api/agent/reminders', agentAuth, (req, res) => {
-  const { shopId, customerPhone, message } = req.body;
+function draftReminder({ shopId, customerPhone, message }) {
   const due = db.shops.some((s) => s.id === shopId) && balances(shopId).find((b) => b.customerPhone === customerPhone);
-  if (!due || due.balance <= 0) return res.status(400).json({ error: 'No dues for that shop/customer' });
-  if (!message) return res.status(400).json({ error: 'message required' });
+  if (!due || due.balance <= 0) throw new Error('No dues for that shop/customer');
+  if (!message) throw new Error('message required');
   const r = { id: id(), shopId, customerName: due.customerName, customerPhone, amount: due.balance, message, status: 'pending', at: now() };
   db.reminders.push(r);
   log('agent', 'drafted_reminder', { reminderId: r.id, shopId, amount: r.amount, message });
-  res.json({ ...r, note: 'Waiting for shopkeeper approval' });
+  return { ...r, note: 'Draft only. Waiting for shopkeeper approval; nothing was sent.' };
+}
+
+const agentAuth = (req, res, next) =>
+  req.get('x-api-key') === process.env.AGENT_API_KEY ||
+  req.get('authorization') === `Bearer ${process.env.AGENT_API_KEY}`
+    ? next()
+    : res.status(401).json({ error: 'Bad API key' });
+
+app.get('/api/agent/dues', agentAuth, (req, res) => res.json(getDues()));
+
+app.post('/api/agent/reminders', agentAuth, (req, res) => {
+  try { res.json(draftReminder(req.body)); } catch (err) { res.status(400).json({ error: err.message }); }
 });
+
+// Remote MCP (Streamable HTTP, stateless) — register in AgenticOrg under Connectors > Remote MCP.
+function buildMcpServer() {
+  const server = new McpServer({ name: 'khata-agent', version: '1.0.0' });
+  const asText = (data) => ({ content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] });
+  server.registerTool('get_dues', {
+    description: 'List every kirana shop with customers who owe money on khata (udhaar): shopId, shop/owner name, customer name, phone and balance in rupees.',
+    inputSchema: {},
+    annotations: { readOnlyHint: true },
+  }, async () => asText(getDues()));
+  server.registerTool('draft_reminder', {
+    description: 'Save a polite payment-reminder DRAFT for one customer, written in the shopkeeper\'s name. Does not send anything: the shopkeeper must approve it in the Khata Agent app, which then creates a Pine Labs payment link.',
+    inputSchema: {
+      shopId: z.string().describe('shopId from get_dues'),
+      customerPhone: z.string().describe('customerPhone from get_dues'),
+      message: z.string().describe('Short reminder text in Hinglish, signed with the shop name'),
+    },
+  }, async (args) => {
+    try { return asText(draftReminder(args)); } catch (err) { return { ...asText({ error: err.message }), isError: true }; }
+  });
+  return server;
+}
+
+app.post('/mcp', agentAuth, async (req, res) => {
+  const server = buildMcpServer();
+  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+  res.on('close', () => { transport.close(); server.close(); });
+  await server.connect(transport);
+  await transport.handleRequest(req, res, req.body);
+});
+app.all('/mcp', (req, res) => res.status(405).json({ error: 'Use POST' }));
 
 app.get('/api/logs', (req, res) => res.json(db.logs.slice().reverse()));
 
