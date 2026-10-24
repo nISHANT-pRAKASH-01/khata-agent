@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Activity Log</title>
+<style>
+  body { margin:0; font-family: system-ui, sans-serif; background:#f6f7f9; color:#1a1d23; }
+  main { max-width: 900px; margin: 0 auto; padding: 16px; }
+  table { width:100%; border-collapse: collapse; background:#fff; }
+  td, th { text-align:left; padding:8px; border-bottom:1px solid #e4e7ec; font-size:.85rem; vertical-align:top; }
+  code { white-space: pre-wrap; word-break: break-all; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Activity log</h1>
+  <p id="stats"></p>
+  <table><thead><tr><th>Time (IST)</th><th>Actor</th><th>Action</th><th>Details</th></tr></thead><tbody id="rows"></tbody></table>
+</main>
+<script>
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+fetch('/api/logs').then((r) => r.json()).then((logs) => {
+  const count = (a) => logs.filter((l) => l.action === a).length;
+  document.getElementById('stats').textContent =
+    `Signups: ${count('signup')} · Agent drafts: ${count('drafted_reminder')} · Approved: ${count('approved_reminder')} · Payments: ${count('payment_received')}`;
+  document.getElementById('rows').innerHTML = logs.map((l) =>
+    `<tr><td>${new Date(l.at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}</td><td>${esc(l.actor)}</td><td>${esc(l.action)}</td><td><code>${esc(JSON.stringify(l.details))}</code></td></tr>`).join('');
+});
+</script>
+</body>
+</html>
