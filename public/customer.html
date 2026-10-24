@@ -27,12 +27,14 @@
 
   <!-- Profile -->
   <section id="v-profile" class="hidden">
-    <div class="card" style="max-width:420px;margin:24px auto">
+    <div class="card" style="max-width:520px;margin:24px auto">
       <h2>One last thing</h2>
       <p class="muted">The shop uses your number to reach you on WhatsApp about your order.</p>
       <label>Your name</label><input id="pName" autocomplete="name">
       <label>Phone</label><input id="pPhone" inputmode="numeric" maxlength="10" placeholder="10-digit mobile">
-      <label>Your area</label><select id="pArea"></select>
+      <h3 style="margin-top:16px">Where do you live?</h3>
+      <p class="muted">We show the shops closest to you, and use this for deliveries.</p>
+      <div id="homePicker"></div>
       <button class="block" style="margin-top:12px" onclick="saveProfile()">Start shopping</button>
     </div>
   </section>
@@ -146,7 +148,6 @@ async function init() {
   const [areas, cfg] = await Promise.all([api('/api/areas'), api('/api/config')]);
   areaCentres = cfg.areas || {};
   const opts = areas.map((a) => `<option>${esc(a)}</option>`).join('');
-  $('pArea').innerHTML = opts;
   $('area').innerHTML = opts;
   // A saved session may be stale (logged out elsewhere, data reset): check it with the server first.
   if (token) {
@@ -154,7 +155,10 @@ async function init() {
     if (r.ok) { me = await r.json(); store.set('customer', JSON.stringify(me)); }
     else { token = me = null; store.set('customerToken', null); store.set('customer', null); }
   } else me = null;
-  if (me?.area) $('area').value = me.area;
+  if (me?.area) {
+    if (![...$('area').options].some((o) => o.value === me.area)) $('area').insertAdjacentHTML('afterbegin', `<option>${esc(me.area)}</option>`);
+    $('area').value = me.area;
+  }
   if (!me) {
     show('login');
     mountSignIn($('signin'), 'customer', onSignedIn);
@@ -172,16 +176,19 @@ function onSignedIn(r) {
   me.profileDone ? init() : showProfile();
 }
 
+let homePicker = null;
 function showProfile() {
   $('pName').value = me.name || ''; $('pPhone').value = me.phone || '';
-  if (me.area) $('pArea').value = me.area;
   show('profile');
+  homePicker = locationPicker($('homePicker'), { initial: me.home, area: me.area, what: 'home' });
 }
 
 async function saveProfile() {
-  me = await call('/api/customers/me', { method: 'PATCH', body: { name: $('pName').value.trim(), phone: $('pPhone').value.trim(), area: $('pArea').value } });
+  const where = homePicker.value();
+  if (!where.location) return toast('Set your location: tap "Use my current location", search, or tap the map');
+  if (!where.area) return toast('Enter your area name');
+  me = await call('/api/customers/me', { method: 'PATCH', body: { name: $('pName').value.trim(), phone: $('pPhone').value.trim(), area: where.area, location: where.location } });
   store.set('customer', JSON.stringify(me));
-  $('area').value = me.area;
   init();
 }
 
@@ -210,8 +217,8 @@ function renderLocBar() {
   $('locBar').innerHTML = {
     live: '📍 <strong>Using your live location</strong>: nearest shops first',
     asking: '📍 Finding your location…',
-    denied: `📍 Showing shops near <strong>${esc(area)}</strong>. Location is off. <button class="small secondary" onclick="watchId=null;startLiveLocation()">Use my location</button>`,
-    off: `📍 Showing shops near <strong>${esc(area)}</strong>`,
+    denied: `📍 Showing shops near ${me?.home && $('area').value === me.area ? 'your home' : `<strong>${esc(area)}</strong>`}. Live location is off. <button class="small secondary" onclick="watchId=null;startLiveLocation()">Use live location</button>`,
+    off: `📍 Showing shops near ${me?.home && $('area').value === me.area ? 'your home' : `<strong>${esc(area)}</strong>`}`,
   }[locState];
 }
 
@@ -227,7 +234,8 @@ const shopCard = (s) => `
 
 async function loadShops() {
   const params = new URLSearchParams({ area: $('area').value, q: $('q').value.trim() });
-  if (myLocation) { params.set('lat', myLocation.lat); params.set('lng', myLocation.lng); }
+  const from = myLocation || (me?.home && $('area').value === me.area ? me.home : null);
+  if (from) { params.set('lat', from.lat); params.set('lng', from.lng); }
   const r = await api('/api/market/shops?' + params);
   renderLocBar();
   $('featuredBox').innerHTML = r.featured.length ? `<h3 style="margin-top:12px">★ Featured shops</h3><div class="grid">${r.featured.map(shopCard).join('')}</div>` : '';
@@ -256,7 +264,7 @@ async function askAssistant() {
   const btn = $('aBtn');
   btn.disabled = true; btn.textContent = 'Finding shops…';
   try {
-    assistResult = await call('/api/assistant/shop', { body: { text: $('aText').value.trim(), location: myLocation } });
+    assistResult = await call('/api/assistant/shop', { body: { text: $('aText').value.trim(), location: myLocation || me.home } });
     const r = assistResult;
     $('aResult').innerHTML = `
       <p style="margin-top:12px"><span class="badge ${r.source === 'agenticorg' ? 'paid' : 'pending'}">${r.source === 'agenticorg' ? 'AgenticOrg agent' : 'Local matcher (AgenticOrg offline)'}</span></p>
@@ -273,7 +281,7 @@ async function askAssistant() {
 
 function renderProducts() {
   $('shopName').textContent = shop.shopName;
-  const d = distKm(myLocation || areaCentre(), shop);
+  const d = distKm(myLocation || me?.home || areaCentre(), shop);
   $('shopMeta').innerHTML = `${d != null ? `<strong>📍 ${travelText(d)}</strong> · ` : ''}${esc(shop.area)} · ${esc(shop.ownerName)} · ${shop.delivery ? 'Delivery or pickup' : 'Pickup only: order ahead, collect packed'}
     <br><a href="${directionsUrl(shop)}" target="_blank"><button class="small secondary" style="margin-top:8px">🧭 Directions</button></a>`;
   const byCat = {};

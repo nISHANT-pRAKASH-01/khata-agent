@@ -294,7 +294,7 @@ app.post('/api/auth/login', (req, res) => {
 });
 
 // ---- Customer side ----
-const customerView = (c) => ({ id: c.id, name: c.name, email: c.email, phone: c.phone, area: c.area, profileDone: Boolean(c.phone && c.area) });
+const customerView = (c) => ({ id: c.id, name: c.name, email: c.email, phone: c.phone, area: c.area, home: c.home || null, profileDone: Boolean(c.phone && c.area) });
 const customerAuth = (req, res, next) => {
   req.customer = db.customers.find((c) => c.token && c.token === req.get('x-customer-token'));
   req.customer ? next() : res.status(401).json({ error: 'Please log in again' });
@@ -303,10 +303,12 @@ const customerAuth = (req, res, next) => {
 app.get('/api/customers/me', customerAuth, (req, res) => res.json(customerView(req.customer)));
 
 app.patch('/api/customers/me', customerAuth, (req, res) => {
-  const { name, phone, area } = req.body;
+  const { name, phone, area, location } = req.body;
   if (!/^\d{10}$/.test(phone || '')) fail(400, 'Enter a 10-digit phone number');
-  if (!area) fail(400, 'Choose your area');
-  Object.assign(req.customer, { phone, area, name: name || req.customer.name });
+  if (!String(area || '').trim()) fail(400, 'Set your location so we can show shops near you');
+  if (location != null && !validPoint(location)) fail(400, 'Pick your location on the map');
+  Object.assign(req.customer, { phone, area: String(area).trim().slice(0, 60), name: name || req.customer.name });
+  if (location) req.customer.home = { lat: Number(location.lat), lng: Number(location.lng) };
   save();
   res.json(customerView(req.customer));
 });
@@ -421,7 +423,7 @@ app.post('/api/orders', customerAuth, (req, res) => {
     customerId: c.id, customerName: c.name, customerPhone: c.phone, customerEmail: c.email,
     items: lines, itemsTotal, platformFee: PLATFORM_FEE, deliveryFee, total: itemsTotal + PLATFORM_FEE + deliveryFee,
     fulfilment, address: address || null,
-    location: fulfilment === 'delivery' ? (validPoint(location) ? location : areaCenter(c.area) || { lat: shop.lat, lng: shop.lng }) : null,
+    location: fulfilment === 'delivery' ? (validPoint(location) ? location : c.home || areaCenter(c.area) || { lat: shop.lat, lng: shop.lng }) : null,
     paymentMethod, paymentStatus: 'pending', status: 'placed', timeline: [{ status: 'placed', at: now() }], at: now(),
   };
   moveStock(shop.id, lines, -1, 'order', order.id);

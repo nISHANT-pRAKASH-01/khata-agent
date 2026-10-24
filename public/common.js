@@ -101,40 +101,53 @@ function travelText(km) {
 }
 const directionsUrl = (p) => `https://www.google.com/maps/dir/?api=1&destination=${p.lat},${p.lng}`;
 
-// Shop location picker: search any place (OpenStreetMap), or use GPS, then drag the pin to the exact spot.
+// Location picker for a shop or a customer's home. The map shows straight away: one tap on
+// "Use my current location", a search, or a tap on the map drops the pin; it can then be dragged.
 // Needs Leaflet on the page. Returns { value() } -> { location, area }.
-function locationPicker(el, { initial, area } = {}) {
+function locationPicker(el, { initial, area, center, what = 'shop' } = {}) {
   let pin = initial && Number.isFinite(initial.lat) ? { lat: initial.lat, lng: initial.lng } : null;
-  let areaEdited = Boolean(area), map, marker, timer;
+  let areaEdited = Boolean(area), marker, timer;
+  const here = what === 'shop' ? "I'm at my shop: use my current location" : 'Use my current location';
   el.innerHTML = `
-    <div class="row"><input class="lp-q grow" placeholder="Type area or address, e.g. Whitefield, Bengaluru" autocomplete="off">
-      <button type="button" class="small secondary lp-gps">📍 I'm at my shop</button></div>
+    <button type="button" class="block lp-gps">📍 ${here}</button>
+    <p class="muted" style="text-align:center;margin:8px 0">or search, or tap on the map</p>
+    <input class="lp-q" placeholder="Type area or address, e.g. Whitefield, Bengaluru" autocomplete="off">
     <div class="lp-results"></div>
-    <div class="lp-map hidden" style="height:240px;border-radius:12px;margin-top:8px"></div>
-    <p class="muted lp-hint hidden">Drag the pin to your shop's exact spot.</p>
-    <label>Area name (shown to customers)</label><input class="lp-area" placeholder="e.g. Whitefield">`;
-  const q = el.querySelector('.lp-q'), results = el.querySelector('.lp-results'), areaInput = el.querySelector('.lp-area');
+    <div class="lp-map" style="height:280px;border-radius:12px;margin-top:8px"></div>
+    <p class="lp-sel" style="margin:8px 0"></p>
+    <label>Area name ${what === 'shop' ? '(shown to customers)' : ''}</label><input class="lp-area" placeholder="e.g. Whitefield">`;
+  const q = el.querySelector('.lp-q'), results = el.querySelector('.lp-results'), areaInput = el.querySelector('.lp-area'), sel = el.querySelector('.lp-sel');
   areaInput.value = area || '';
   areaInput.oninput = () => { areaEdited = true; };
-  const lookupArea = async () => {
-    if (areaEdited) return;
-    try { const p = await api(`/api/geo/reverse?lat=${pin.lat}&lng=${pin.lng}`); if (p.area && !areaEdited) areaInput.value = p.area; } catch {}
+  const showSelected = (text) => {
+    sel.innerHTML = pin ? `✅ <strong>Selected:</strong> ${esc(text || `${pin.lat.toFixed(5)}, ${pin.lng.toFixed(5)}`)}<br><span class="muted">Not exact? Drag the pin or tap the right spot.</span>`
+      : `<span class="muted">No location yet. Use the button above, search, or tap the map.</span>`;
   };
-  const place = (lat, lng, zoom = 16) => {
+  const lookup = async () => {
+    showSelected('Finding the address…');
+    try {
+      const p = await api(`/api/geo/reverse?lat=${pin.lat}&lng=${pin.lng}`);
+      showSelected(p.label ? p.label.split(',').slice(0, 4).join(',') : '');
+      if (p.area && !areaEdited) areaInput.value = p.area;
+    } catch { showSelected(''); }
+  };
+  const map = L.map(el.querySelector('.lp-map'));
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
+  const place = (lat, lng, zoom) => {
     pin = { lat, lng };
-    el.querySelector('.lp-map').classList.remove('hidden');
-    el.querySelector('.lp-hint').classList.remove('hidden');
-    if (!map) {
-      map = L.map(el.querySelector('.lp-map'));
-      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
+    if (!marker) {
       marker = L.marker([lat, lng], { draggable: true }).addTo(map);
-      marker.on('dragend', () => { const p = marker.getLatLng(); pin = { lat: p.lat, lng: p.lng }; lookupArea(); });
-      map.on('click', (e) => { marker.setLatLng(e.latlng); pin = { lat: e.latlng.lat, lng: e.latlng.lng }; lookupArea(); });
+      marker.on('dragend', () => { const p = marker.getLatLng(); pin = { lat: p.lat, lng: p.lng }; lookup(); });
     }
     marker.setLatLng([lat, lng]);
-    map.setView([lat, lng], zoom);
-    setTimeout(() => map.invalidateSize(), 50);
+    map.setView([lat, lng], zoom || Math.max(map.getZoom() || 0, 16));
   };
+  map.on('click', (e) => { place(e.latlng.lat, e.latlng.lng); lookup(); });
+  const start = pin || center || { lat: 12.9716, lng: 77.5946 }; // Bengaluru until we know better
+  map.setView([start.lat, start.lng], pin ? 16 : center ? 13 : 11);
+  if (pin) { place(pin.lat, pin.lng, 16); showSelected(area); } else showSelected();
+  setTimeout(() => map.invalidateSize(), 100);
+
   q.oninput = () => {
     clearTimeout(timer);
     const text = q.value.trim();
@@ -143,24 +156,30 @@ function locationPicker(el, { initial, area } = {}) {
       results.innerHTML = '<p class="muted">Searching…</p>';
       try {
         const list = await api('/api/geo/search?q=' + encodeURIComponent(text));
-        results.innerHTML = list.map((p, i) => `<button type="button" class="ghost small lp-r" data-i="${i}" style="display:block;text-align:left;width:100%">📍 ${esc(p.label)}</button>`).join('')
-          || '<p class="muted">No match. Try adding the city, e.g. "Whitefield, Bengaluru".</p>';
+        results.innerHTML = list.map((p, i) => {
+          const parts = p.label.split(',').map((x) => x.trim());
+          return `<button type="button" class="secondary lp-r" data-i="${i}" style="display:block;text-align:left;width:100%;margin:4px 0;font-weight:normal">
+            📍 <strong>${esc(parts[0])}</strong><br><span class="muted">${esc(parts.slice(1, 4).join(', '))}</span></button>`;
+        }).join('') || '<p class="muted">No match. Try adding the city, e.g. "Whitefield, Bengaluru", or tap on the map.</p>';
         results.querySelectorAll('.lp-r').forEach((b) => b.onclick = () => {
           const p = list[b.dataset.i];
-          q.value = p.label; results.innerHTML = '';
+          results.innerHTML = ''; q.value = '';
           if (!areaEdited) areaInput.value = p.area;
-          place(p.lat, p.lng);
+          place(p.lat, p.lng, 16);
+          showSelected(p.label.split(',').slice(0, 4).join(','));
         });
       } catch { results.innerHTML = ''; }
-    }, 600);
+    }, 500);
   };
   el.querySelector('.lp-gps').onclick = () => {
-    if (!navigator.geolocation) return toast('Location not available on this device');
-    toast('Finding your location…');
-    navigator.geolocation.getCurrentPosition((p) => { place(p.coords.latitude, p.coords.longitude, 17); lookupArea(); },
-      () => toast('Could not get your location. Search for your area instead.'), { enableHighAccuracy: true, timeout: 15000 });
+    if (!navigator.geolocation) return toast('Location is not available on this device. Search or tap the map.');
+    const b = el.querySelector('.lp-gps');
+    b.disabled = true; b.textContent = 'Finding your location…';
+    navigator.geolocation.getCurrentPosition(
+      (p) => { b.disabled = false; b.textContent = `📍 ${here}`; place(p.coords.latitude, p.coords.longitude, 17); lookup(); },
+      () => { b.disabled = false; b.textContent = `📍 ${here}`; toast('Could not get your location. Allow location access, or search / tap the map.'); },
+      { enableHighAccuracy: true, timeout: 15000 });
   };
-  if (pin) place(pin.lat, pin.lng);
   return { value: () => ({ location: pin, area: areaInput.value.trim() }) };
 }
 

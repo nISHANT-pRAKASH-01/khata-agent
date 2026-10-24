@@ -91,3 +91,7 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 
 /* Keep Leaflet's internal layers inside the map so they never cover buttons or the header. */
 .leaflet-container { position: relative; z-index: 0; }
+
+/* Small phones: keep the top bar on one line. */
+header.top .bar > * { white-space: nowrap; }
+@media (max-width: 480px) { #who { display: none; } }
