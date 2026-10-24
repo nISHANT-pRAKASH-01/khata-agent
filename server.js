@@ -6,6 +6,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
 import * as pinelabs from './pinelabs.js';
+import * as agenticorg from './agenticorg.js';
 
 const DATA_FILE = process.env.DATA_FILE || 'data.json';
 const db = fs.existsSync(DATA_FILE)
@@ -66,6 +67,22 @@ app.post('/api/shops/:shopId/entries', (req, res) => {
   db.entries.push(entry);
   log('shopkeeper', `khata_${type}`, entry);
   res.json(entry);
+});
+
+// Shopkeeper asks the AgenticOrg agent to check dues now; it drafts via our /mcp tools.
+app.post('/api/shops/:shopId/run-agent', async (req, res) => {
+  const shop = db.shops.find((s) => s.id === req.params.shopId);
+  if (!shop) return res.status(404).json({ error: 'Shop not found' });
+  if (!agenticorg.isConfigured()) return res.status(503).json({ error: 'AgenticOrg agent not connected yet' });
+  log('shopkeeper', 'asked_agent', { shopId: shop.id });
+  try {
+    const run = await agenticorg.runAgent({ shopId: shop.id, shopName: shop.shopName, task: 'Check dues for this shop and draft reminders' });
+    log('agent', 'agenticorg_run', { shopId: shop.id, runId: run.runId, status: run.status });
+    res.json(run);
+  } catch (err) {
+    log('agent', 'agenticorg_run_failed', { shopId: shop.id, error: err.message });
+    res.status(502).json({ error: err.message });
+  }
 });
 
 // Human-in-the-loop: the shopkeeper approves or rejects what the agent drafted.

@@ -58,6 +58,7 @@
 
     <div class="card">
       <h2>Agent drafts waiting for you</h2>
+      <button id="runAgent" onclick="runAgent()">Ask Khata Munshi to check dues</button>
       <div id="reminders"></div>
     </div>
 
@@ -93,6 +94,12 @@ async function addEntry() {
   await api(`/api/shops/${shopId}/entries`, { customerName: $('cName').value, customerPhone: $('cPhone').value, amount: Number($('amount').value), type: $('type').value, note: $('note').value });
   ['cName','cPhone','amount','note'].forEach((f) => $(f).value = '');
   render();
+}
+
+async function runAgent() {
+  const btn = $('runAgent');
+  btn.disabled = true; btn.textContent = 'Agent is working…';
+  try { await api(`/api/shops/${shopId}/run-agent`, {}); } finally { btn.disabled = false; btn.textContent = 'Ask Khata Munshi to check dues'; render(); }
 }
 
 async function approve(id) { await api(`/api/reminders/${id}/approve`, { message: $(`msg-${id}`).value }); render(); }
