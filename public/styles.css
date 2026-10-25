@@ -95,3 +95,11 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 /* Small phones: keep the top bar on one line. */
 header.top .bar > * { white-space: nowrap; }
 @media (max-width: 480px) { #who { display: none; } }
+
+/* Founder card on the home page */
+:root { --blue: #1d5fd6; }
+@media (prefers-color-scheme: dark) { :root { --blue: #7aa8ff; } }
+.founder { display: flex; align-items: center; gap: 20px; margin-top: 24px; }
+.founder img { width: 96px; height: 96px; border-radius: 50%; object-fit: cover; border: 3px solid var(--blue); flex-shrink: 0; }
+.founder-name { font-size: 1.4rem; font-weight: 800; color: var(--blue); }
+.founder-role { color: var(--blue); font-weight: 600; }
